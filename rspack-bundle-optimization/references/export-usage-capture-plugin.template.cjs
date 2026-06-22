@@ -59,6 +59,36 @@ class ExportUsageCapturePlugin {
         return undefined; // do not bail
       });
     });
+
+    // Reference-site capture: dump POST-LOADER source for modules that contain
+    // decorator/metadata emit, so the usage-kind analysis can tell whether an
+    // export is genuinely used or only referenced by a `_ts_metadata`/`_ts_decorate`
+    // artifact (e.g. emitDecoratorMetadata turning a type-only import into a runtime
+    // `_ts_metadata("design:type", X)` reference). originalSource() is post-loader
+    // (what rspack actually saw), where these artifacts live; .ts on disk is pre-transform.
+    const MARKER = /_ts_metadata|__metadata\(|Reflect\.metadata|_ts_decorate|__decorate\(/;
+    compiler.hooks.done.tap('ExportUsageCapturePlugin', (stats) => {
+      try {
+        const outDir = resolve(this.options.outDir || './tmp');
+        mkdirSync(outDir, { recursive: true });
+        const compilation = stats.compilation;
+        const out = [];
+        let scanned = 0;
+        for (const m of compilation.modules || []) {
+          const resource = m.resource || (m.nameForCondition && m.nameForCondition());
+          if (!resource || !/\.[cm]?[jt]sx?$/.test(resource)) continue;
+          scanned++;
+          let src = '';
+          try { src = m.originalSource && m.originalSource() ? m.originalSource().source().toString() : ''; } catch {}
+          if (src && MARKER.test(src)) out.push({ path: resource, source: src });
+        }
+        const outPath = resolve(outDir, 'rsdoctor-marker-sources.json');
+        writeFileSync(outPath, JSON.stringify({ scanned, markerModuleCount: out.length, modules: out }));
+        console.log(`[ExportUsageCapture] ${out.length}/${scanned} modules with decorator/metadata markers -> ${outPath}`);
+      } catch (e) {
+        console.error('[ExportUsageCapture] marker-source capture failed:', e && e.stack ? e.stack : e);
+      }
+    });
   }
 }
 

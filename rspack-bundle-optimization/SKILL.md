@@ -31,7 +31,7 @@ Available modes:
 - **Reachability**: analyze chunk-group reachability to detect async/shared chunks carrying modules the group does not need.
 - **Retained Unused**: inspect `usedExports = []` modules, optimization bailouts, and side-effect candidates. Run with `concatenateModules: false` for discovery, then give EVERY such module a per-module disposition (keep / likely-removable / confirm-by-source / investigate) with evidence — not just a flat candidate list.
 - **Side Effects Experiment**: env-gated `sideEffects: false` candidate experiments with before/after emitted JS deltas.
-- **Export Usage Roots**: analyze all Rspack/Rsdoctor export usage chains, without Rollup comparison, and give EVERY used export a usage verdict (genuinely-used / needs-source-confirmation / over-retained-suspect) from where its chains terminate — so each export is individually verified, then rolled up to terminal roots and root-cause categories.
+- **Export Usage Roots**: analyze all Rspack/Rsdoctor export usage chains, without Rollup comparison, and give EVERY used export a usage verdict (genuinely-used / needs-source-confirmation / over-retained-suspect) from where its chains terminate — so each export is individually verified, then rolled up to terminal roots and root-cause categories. Includes a reference-kind artifact check that flags exports only "used" via `_ts_metadata` decorator emit (a false-positive caused by `emitDecoratorMetadata`).
 - **Rollup Diff**: compare Rollup vs Rspack export usage to find source-level bad-pattern hypotheses. Require reference chains and source inspection before calling a gap actionable.
 - **CJS-to-ESM Experiment**: use the experimental loader to estimate package-patch upside if transpiled CJS became real ESM.
 - **SplitChunks**: test cacheGroup `name` removal, `minSize: 0`, and shared-chunk tuning when reachability points to shared chunk fan-in.
@@ -371,6 +371,7 @@ For rspack's built-in export-usage graph (`@rspack/core` >= 2.1.0-beta.0; the `e
 2. **Transform** — `node references/build-all-export-usage.template.cjs --raw rsdoctor-export-usage-raw.json --out rsdoctor-all-export-usage.json`. This reverse-BFSes each used export to its terminal roots, handles the namespace-edge gotcha (a `targetExports===null` edge keeps every export of the provider alive — propagate it; it also marks the resulting chain edges `viaNamespace` so the analyzer can tell precise from coarse retention), and caps depth/branches.
 3. **Analyze (triage)** — `node references/export-usage-root-analysis.template.cjs --usage rsdoctor-all-export-usage.json --context "$PWD" --out-dir export-usage-roots`. Emits the per-export verdict distribution + the `confirmationWorklist`.
 4. **Confirm (agent judges every unresolved export)** — work the `confirmationWorklist` with the agent: read each terminal root's source and resolve its exports to confirmed-used / confirmed-removable / still-unknown. Fan out with subagents for scale. See "Confirm every export with the model" below. The script triages; this step is where every export actually gets analyzed.
+5. **Artifact check (reference-kind)** — `node references/usage-kind-analysis.template.cjs --sources rsdoctor-marker-sources.json --out-dir usage-kind --context "$PWD"`. Flags exports referenced *only* by `_ts_metadata` decorator emit (false-positive "used"). See "Reference-kind / artifact verification" below. Run `--self-test` once to confirm the detector works on your toolchain.
 
 ### Execution workflow
 
@@ -506,6 +507,17 @@ How to do it without drowning:
 - **Loop until covered.** Keep going until every export has an agent-confirmed verdict. If you must stop early, report coverage explicitly (`N of M exports confirmed`, which roots remain) — never let an unread bucket masquerade as analyzed. Silent truncation is the failure mode this whole step exists to prevent.
 
 The deliverable is a **per-export ledger** where every used export ends at one of: genuinely-used (script-cleared or agent-confirmed), confirmed-removable (with the rewrite), or explicitly-still-unknown — with the agent's evidence for every non-trivial one. "The script said needs-source-confirmation" is not an acceptable final state for any export.
+
+### Reference-kind / artifact verification (is it *really* used?)
+
+"Used" per rspack only means *something references the export* — and that something can be an **artifact**, not real runtime use. The signature case: with **`emitDecoratorMetadata`** (legacy `experimentalDecorators`), a class imported only as a *type* on a decorated member/constructor param is emitted as a runtime `_ts_metadata("design:type", X)` reference, so rspack keeps the whole class even though it is functionally type-only. The export usage graph alone (and the per-export verdict above) will report this as "used" — a false positive that no amount of chain-following catches, because the reference is real in the emitted code.
+
+To catch it you must look at the **reference site's emitted (post-loader) source**, not the export graph and not the on-disk `.ts` (where types are still erasable). The pipeline:
+
+1. The capture plugin (`references/export-usage-capture-plugin.template.cjs`) also dumps `module.originalSource()` (post-loader) for every module containing decorator/metadata markers (`_ts_metadata` / `__metadata` / `_ts_decorate` / `__decorate`) → `rsdoctor-marker-sources.json`. `originalSource()` is what rspack actually saw, where the artifacts live.
+2. `references/usage-kind-analysis.template.cjs` classifies, for each imported binding in those modules, whether it is referenced **genuinely** (call / `new` / JSX / `extends` / value read) or **only inside `_ts_metadata(...)` emit** → a `decorator-metadata-only` artifact, with the fix (`import type`, or disable metadata emit on that path). It splits findings into first-party (actionable) vs vendor (patch-upstream), and has a `--self-test` that proves the detector fires on a synthetic `emitDecoratorMetadata` fixture.
+
+Interpretation: a `decorator-metadata-only` import is genuinely removable from that consumer (switch to `import type`); whether the *export* then drops from the bundle depends on whether it has other genuine consumers (cross-check the export-usage edges). **A project that uses TC39 `2022-03` decorators (not legacy `experimentalDecorators` + `emitDecoratorMetadata`) emits no `design:*` metadata, so this analysis correctly reports zero app-level artifacts — that is a real result, not a miss.** Polyfill-injected "uses" (core-js via swc `env.mode: "usage"`) are the other artifact class; they surface in Reachability/Retained-Unused (trace incoming connections to the injection source), not here.
 
 ### Interpretation
 
@@ -882,7 +894,9 @@ Read these only when you need them:
 - [references/cjs2esm-package-size-diff.cjs](references/cjs2esm-package-size-diff.cjs)
   Use after a CJS-to-ESM experiment to compare baseline and experiment stats at npm package granularity.
 - [references/export-usage-capture-plugin.template.cjs](references/export-usage-capture-plugin.template.cjs)
-  Capture rspack's builtin Rsdoctor export-usage graph (`exportUsageEdges`) into `rsdoctor-export-usage-raw.json`. Needs `@rspack/core` >= 2.1.0-beta.0. First step of the Export Usage Roots pipeline.
+  Capture rspack's builtin Rsdoctor export-usage graph (`exportUsageEdges`) into `rsdoctor-export-usage-raw.json`, AND dump post-loader source of decorator/metadata-bearing modules into `rsdoctor-marker-sources.json` (for the artifact check). Needs `@rspack/core` >= 2.1.0-beta.0. First step of the Export Usage Roots pipeline.
+- [references/usage-kind-analysis.template.cjs](references/usage-kind-analysis.template.cjs)
+  Reference-kind / artifact check: flags imports referenced ONLY by `_ts_metadata` decorator emit (false-positive "used" from `emitDecoratorMetadata`), with the `import type` fix and a first-party/vendor split. `--self-test` proves the detector. Answers "is this export really used, or only used by decorator/polyfill artifact code".
 - [references/build-all-export-usage.template.cjs](references/build-all-export-usage.template.cjs)
   Transform the raw `exportUsageEdges` into `rsdoctor-all-export-usage.json` (per-export chains to terminal roots, namespace-edge handling, `viaNamespace` flag for precise-vs-coarse). Second step of the pipeline.
 - [references/export-usage-root-analysis.template.cjs](references/export-usage-root-analysis.template.cjs)

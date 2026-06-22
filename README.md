@@ -18,10 +18,11 @@ The skill drives a sequence of analyses, each with a clear stop condition:
 | **CJS-to-ESM** | Would a dependency shipping real ESM shake/concatenate better? |
 | **Rollup Diff** | Rollup removed an export rspack kept — is there a source pattern to rewrite? |
 
-Two things make the analysis *complete* rather than a sampled candidate list:
+Three things make the analysis *complete* rather than a sampled candidate list:
 
 - **Per-module disposition** — every `usedExports=[]` module gets a verdict backed by its bailout statement's source snippet.
 - **Per-export verification** — the script *triages* all used exports cheaply; an agent (Claude/Codex) then reads source to confirm every export the script could not clear (grouped by terminal root, fanned out with subagents, looped until covered with explicit coverage reporting). "The script said needs-confirmation" is not an acceptable final state for any export.
+- **Reference-kind / artifact check** — "used" can be a false positive. With `emitDecoratorMetadata`, a type-only import becomes a runtime `_ts_metadata("design:type", X)` reference, so rspack keeps the whole class. The skill reads the post-loader source at the reference site and flags exports referenced *only* by decorator-metadata emit (fix: `import type`) — distinguishing genuine use from artifact use. (TC39 `2022-03` decorators emit no such metadata, so the check correctly reports zero for those projects.)
 
 ## Requirements
 
@@ -59,9 +60,10 @@ rspack-bundle-optimization/
     ├── chunk-group-reachability-plugin.template.cjs   # reachability + interactive chunk graph
     ├── retained-unused-side-effects-plugin.template.cjs # capture usedExports=[] modules + bailouts
     ├── retained-unused-disposition.template.cjs         # per-module verdict + true removable upper bound
-    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges (rspack >= 2.1.0-beta.0)
+    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges + decorator/metadata marker sources (rspack >= 2.1.0-beta.0)
     ├── build-all-export-usage.template.cjs              # edges -> per-export chains to terminal roots
     ├── export-usage-root-analysis.template.cjs          # per-export + per-root usage verdicts
+    ├── usage-kind-analysis.template.cjs                 # reference-kind / decorator-metadata artifact check (--self-test)
     ├── cjs2esm-package-size-diff.cjs                    # package-level size delta for CJS->ESM experiments
     └── optimization-summary-template.md                 # consistent report template
 ```
