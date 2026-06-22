@@ -22,7 +22,7 @@ Three things make the analysis *complete* rather than a sampled candidate list:
 
 - **Per-module disposition** — every `usedExports=[]` module gets a verdict backed by its bailout statement's source snippet.
 - **Per-export verification** — the script *triages* all used exports cheaply; an agent (Claude/Codex) then reads source to confirm every export the script could not clear (grouped by terminal root, fanned out with subagents, looped until covered with explicit coverage reporting). "The script said needs-confirmation" is not an acceptable final state for any export.
-- **Reference-kind / artifact check** — "used" can be a false positive. With `emitDecoratorMetadata`, a type-only import becomes a runtime `_ts_metadata("design:type", X)` reference, so rspack keeps the whole class. The skill reads the post-loader source at the reference site and flags exports referenced *only* by decorator-metadata emit (fix: `import type`) — distinguishing genuine use from artifact use. (TC39 `2022-03` decorators emit no such metadata, so the check correctly reports zero for those projects.)
+- **Reference-kind / artifact check (agent-driven)** — "used" can be a false positive: with `emitDecoratorMetadata` a type-only import becomes a runtime `_ts_metadata("design:type", X)` reference; swc `env.mode:"usage"` injects polyfills; barrels/helpers forward symbols. The skill captures the **post-loader source** (`module.originalSource()` — what rspack actually saw, where artifacts live) and the **agent reads each reference site and judges genuine-vs-artifact case by case** — it does *not* hard-code a pattern, so it isn't limited to the artifact shapes someone anticipated. The `show-post-loader` helper surfaces candidates and serves the source; the verdict is the agent's.
 
 ## Requirements
 
@@ -60,10 +60,10 @@ rspack-bundle-optimization/
     ├── chunk-group-reachability-plugin.template.cjs   # reachability + interactive chunk graph
     ├── retained-unused-side-effects-plugin.template.cjs # capture usedExports=[] modules + bailouts
     ├── retained-unused-disposition.template.cjs         # per-module verdict + true removable upper bound
-    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges + decorator/metadata marker sources (rspack >= 2.1.0-beta.0)
+    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges + post-loader source store (rspack >= 2.1.0-beta.0)
     ├── build-all-export-usage.template.cjs              # edges -> per-export chains to terminal roots
     ├── export-usage-root-analysis.template.cjs          # per-export + per-root usage verdicts
-    ├── usage-kind-analysis.template.cjs                 # reference-kind / decorator-metadata artifact check (--self-test)
+    ├── show-post-loader.template.cjs                    # read post-loader source on demand so the agent judges reference-kind / artifacts
     ├── cjs2esm-package-size-diff.cjs                    # package-level size delta for CJS->ESM experiments
     └── optimization-summary-template.md                 # consistent report template
 ```

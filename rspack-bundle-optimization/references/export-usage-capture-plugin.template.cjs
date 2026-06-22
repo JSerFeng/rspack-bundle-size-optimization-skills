@@ -60,33 +60,57 @@ class ExportUsageCapturePlugin {
       });
     });
 
-    // Reference-site capture: dump POST-LOADER source for modules that contain
-    // decorator/metadata emit, so the usage-kind analysis can tell whether an
-    // export is genuinely used or only referenced by a `_ts_metadata`/`_ts_decorate`
-    // artifact (e.g. emitDecoratorMetadata turning a type-only import into a runtime
-    // `_ts_metadata("design:type", X)` reference). originalSource() is post-loader
-    // (what rspack actually saw), where these artifacts live; .ts on disk is pre-transform.
-    const MARKER = /_ts_metadata|__metadata\(|Reflect\.metadata|_ts_decorate|__decorate\(/;
+    // Post-loader source capture. `originalSource()` is what rspack actually saw
+    // (after loaders / swc transform) — where artifacts live that the pre-transform
+    // `.ts` on disk does NOT show: decorator emit (`_ts_metadata`/`_ts_decorate`),
+    // injected polyfills, re-export passthroughs, helper wrappers, etc.
+    //
+    // This does NOT decide anything. It just makes the post-loader source readable so
+    // an agent (Claude/Codex) can open each module and confirm, case by case, whether
+    // an export is genuinely used or only referenced by an artifact. Hard-coding a
+    // single pattern (e.g. a `_ts_metadata` regex) would miss every other artifact shape;
+    // the judgement is the agent's, from reading the actual code.
+    //
+    // Output:
+    //   post-loader-sources.jsonl   one {path, bytes, markers[]} + source per line (first-party + any marker-bearing module)
+    //   post-loader-index.json      { path -> {line, bytes, markers[]} }  so the agent/helper can locate a module fast
+    const ARTIFACT_MARKERS = [
+      ['decorator', /_ts_decorate|__decorate\(/],
+      ['decorator-metadata', /_ts_metadata|__metadata\(|Reflect\.metadata|design:(type|paramtypes|returntype)/],
+      ['polyfill', /core-js|regeneratorRuntime|@swc[\\/]helpers/],
+      ['reexport', /__export\(|__reExport\(|Object\.defineProperty\(exports/],
+    ];
+    const isFirstParty = (p) => !/[\\/]node_modules[\\/]/.test(p);
     compiler.hooks.done.tap('ExportUsageCapturePlugin', (stats) => {
       try {
         const outDir = resolve(this.options.outDir || './tmp');
         mkdirSync(outDir, { recursive: true });
         const compilation = stats.compilation;
-        const out = [];
+        const lines = [];
+        const index = {};
         let scanned = 0;
+        let lineNo = 0;
         for (const m of compilation.modules || []) {
           const resource = m.resource || (m.nameForCondition && m.nameForCondition());
           if (!resource || !/\.[cm]?[jt]sx?$/.test(resource)) continue;
-          scanned++;
           let src = '';
           try { src = m.originalSource && m.originalSource() ? m.originalSource().source().toString() : ''; } catch {}
-          if (src && MARKER.test(src)) out.push({ path: resource, source: src });
+          if (!src) continue;
+          scanned++;
+          const markers = ARTIFACT_MARKERS.filter(([, re]) => re.test(src)).map(([k]) => k);
+          // Capture first-party modules (where the agent can act) and any module that
+          // shows an artifact marker (where genuine-vs-artifact must be confirmed).
+          if (!isFirstParty(resource) && markers.length === 0) continue;
+          index[resource] = { line: lineNo, bytes: src.length, markers };
+          lines.push(JSON.stringify({ path: resource, bytes: src.length, markers, source: src }));
+          lineNo++;
         }
-        const outPath = resolve(outDir, 'rsdoctor-marker-sources.json');
-        writeFileSync(outPath, JSON.stringify({ scanned, markerModuleCount: out.length, modules: out }));
-        console.log(`[ExportUsageCapture] ${out.length}/${scanned} modules with decorator/metadata markers -> ${outPath}`);
+        writeFileSync(resolve(outDir, 'post-loader-sources.jsonl'), lines.join('\n') + '\n');
+        writeFileSync(resolve(outDir, 'post-loader-index.json'), JSON.stringify({ scanned, captured: lines.length, index }, null, 2));
+        const withMarker = Object.values(index).filter((v) => v.markers.length).length;
+        console.log(`[ExportUsageCapture] captured post-loader source for ${lines.length}/${scanned} modules (${withMarker} with artifact markers) -> post-loader-sources.jsonl`);
       } catch (e) {
-        console.error('[ExportUsageCapture] marker-source capture failed:', e && e.stack ? e.stack : e);
+        console.error('[ExportUsageCapture] post-loader capture failed:', e && e.stack ? e.stack : e);
       }
     });
   }
