@@ -35,7 +35,7 @@ Available modes:
 - **Rollup Diff**: compare Rollup vs Rspack export usage to find source-level bad-pattern hypotheses. Require reference chains and source inspection before calling a gap actionable.
 - **CJS-to-ESM Experiment**: use the experimental loader to estimate package-patch upside if transpiled CJS became real ESM.
 - **SplitChunks**: test cacheGroup `name` removal, `minSize: 0`, and shared-chunk tuning when reachability points to shared chunk fan-in.
-- **ECMA Level Upgrade**: raise the output ECMA/syntax level in BOTH the transform (babel/swc) and the minifier (terser/swc), verify modern syntax is actually preserved (not downleveled) at each stage, then measure the emitted-JS delta with variables held constant. If the gain is large, re-verify it is syntax compaction (not changed module count / used exports / side effects).
+- **ECMA Level Upgrade**: raise the output ECMA/syntax level in BOTH the transform (babel/swc) and the minifier (terser/swc), verify modern syntax is actually preserved (not downleveled) at each stage, then measure emitted-JS deltas with module-count and module-presence attribution so "same modules got smaller" is separated from "modules disappeared".
 - **Full Pipeline**: run Quick Triage, then the relevant analysis modes in evidence order; use this only when the user wants a comprehensive investigation.
 
 Suggested first response for a broad request:
@@ -52,7 +52,7 @@ Routing shortcuts:
 - "cjs2esm", "esm loader", "transpiled cjs" -> CJS-to-ESM Experiment
 - "chunk", "拆包", "shared chunk", "reachability" -> Reachability, then SplitChunks if shared chunk fan-in is confirmed
 - "usedExports", "bailout", "side effects" -> Retained Unused, then Side Effects Experiment if candidates look safe
-- "ecma", "es 版本", "提高 ecma", "syntax level", "target", "降级", "downlevel", "babel/swc target" -> ECMA Level Upgrade
+- "ecma", "es2022", "es 版本", "提高 ecma", "syntax level", "target", "tools.swc", "minify target", "swc target", "降级", "downlevel", "babel/swc target" -> ECMA Level Upgrade
 - "全部", "一起做", "full pipeline" -> Full Pipeline
 
 ## Quick Start
@@ -771,6 +771,13 @@ Inspect the config and `package.json`. It is one of:
 
 Match the project's actual tool; do not introduce a second transform.
 
+For **Rsbuild/Rspeedy** projects, prefer the public framework hook for the transform target:
+
+- set transform-side SWC target in `tools.swc` (for example `jsc.target = "es2022"`, and remove/avoid conflicting `swc.env`);
+- set final JS minimizer ECMA options separately in `tools.rspack` by updating the configured minimizer.
+
+Do not only mutate matched loader rules under `tools.rspack` and assume the transform target took effect; Rsbuild can generate or normalize SWC options after those rules are constructed.
+
 ### Step 2: raise the transform ECMA level (env-gated)
 
 Pick a concrete high target and apply it to **every** loader rule that transforms JS/TS (it is common to miss a secondary rule, e.g. an SVG/`@svgr` loader chain with its own `env`). For swc prefer an explicit `jsc.target: "es2022"` (or `esnext`); for browserslist use a modern line like `["chrome >= 100"]`.
@@ -804,16 +811,32 @@ Re-grep the FINAL minified assets for the same modern-syntax markers from Step 3
 
 Run a normal production build with EVERYTHING else identical (same entry, same deps, same splitChunks, same mangle/compress passes, same `usedExports`/`sideEffects`/`concatenateModules`). The ONLY change is the ECMA level (loader + minifier). Compare emitted JS total and per-asset, raw and gzip.
 
+Also capture two dist snapshots and run sourcemap-based generated-byte attribution. Stats `module.size` is pre-minify and is not enough to explain final emitted JS. The report must include:
+
+- emitted app JS raw and gzip;
+- sourcemap-mapped raw bytes;
+- app JS asset count and top changed assets;
+- baseline module count vs current module count from sourcemap attribution;
+- `common retained`, `retained shrunk`, `retained grown`, `removed from app JS`, and `added to app JS` buckets.
+
 ### Step 7: if the gain is very large, re-verify it is really ECMA
 
 A large drop is suspicious — confirm it is the syntax level, not an accidental change to WHAT is bundled. Re-run with the same `usedExports`/stats capture and check these are UNCHANGED vs the baseline:
 
-- **module count** (a different count means resolution/target changed which files are pulled, e.g. fewer polyfills — that is legitimate but should be attributed separately as "polyfill reduction", not "syntax level");
+- **module count and module presence** (a different count means resolution/target changed which files are pulled, e.g. fewer polyfills — that is legitimate but should be attributed separately as "removed from app JS", not pure syntax compaction);
 - **used exports count** (`usedExports`) — must match;
 - **retained side-effect-only modules** — must match;
 - entry/chunk membership — must match.
 
-Attribute the delta across three buckets and report each: (a) native-syntax compaction, (b) dropped transpiler helpers (`@swc/helpers`/`@babel/runtime`/regenerator), (c) reduced `core-js` polyfills. If module count / used exports / side-effects changed, the headline number is NOT pure ECMA — split it.
+Attribute the delta across these buckets and report each:
+
+- **retained-but-shrunk** — the same module exists before and after, but generated bytes shrink because modern syntax avoids downlevel output (`async/await`, `?.`, `??`, object spread/rest, `for...of`, class fields) or gives the minifier a shorter expression shape;
+- **removed-from-app-JS** — a module had generated bytes in the baseline and zero after the target upgrade, usually `core-js`, `@swc/helpers`, `@babel/runtime`, `tslib`, or `regenerator-runtime`;
+- **added-to-app-JS** and **retained-grown** — offset buckets that must be subtracted from the headline win.
+
+If `retained-but-shrunk` dominates, say the win is transform/minifier output-shape compaction. If `removed-from-app-JS` dominates, say the win is mostly helper/polyfill removal. Do not describe the whole win as "modules disappeared" unless that bucket is actually dominant.
+
+For every reduced module in the detailed report, include the source path, before/after generated bytes, before/after asset membership, a reason category (`async-await`, `optional-chain-nullish`, `spread-rest`, `class-fields`, `for-of`, `helper-or-polyfill`, `runtime`, `minifier-expression-shape`), and a source snippet that explains the category.
 
 ### Risk
 
@@ -835,7 +858,7 @@ For each project, produce a short summary with:
 - Rollup-vs-Rspack gap count, chain coverage, and top actionable bad-pattern candidates
 - CJS-to-ESM loader hit/skip counts, emitted JS delta, and package-level size delta table
 - splitChunks tuning results (entrypoint and per-group deltas)
-- ECMA level upgrade: transform tool, old vs new target, loader-output verification (modern syntax preserved), minifier-output verification, emitted-JS delta with variables held constant, and the delta split into native-syntax / dropped-helpers / reduced-polyfills (plus confirmation that module count, used exports, and side-effects are unchanged)
+- ECMA level upgrade: transform tool, old vs new target, loader-output verification (modern syntax preserved), minifier-output verification, emitted-JS delta with variables held constant, sourcemap-mapped raw delta, module count before/after, module-presence buckets (`retained shrunk`, `removed from app JS`, `retained grown`, `added to app JS`), dominant bucket, reason categories, and top module snippets. If used exports or side-effects changed, label that separately instead of calling it pure ECMA syntax compaction.
 - final residual candidates
 - conclusion on whether this route is worth keeping
 
