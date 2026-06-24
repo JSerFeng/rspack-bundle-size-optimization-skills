@@ -408,6 +408,7 @@ Before using the report to choose optimizations, audit the capture itself:
 - Specificity: a chain that only reaches the target module's own `export` statement is not a consumer chain. Continue upstream until a terminal/root consumer or explicit cap is reached.
 - Export correctness: every edge shown for a target export must carry that target export, an origin export that propagates to it, or a namespace/unknown marker that honestly explains loss of precision. Do not display unrelated specifiers on the edge.
 - Location correctness: source highlighting must use dependency/specifier `loc` from the edge. Text search for the export name is only a fallback and must be labeled as approximate.
+- Root trigger correctness: every top root must show which part of the root module starts the representative chains. Prefer the root-side edge `loc` exposed by Rsdoctor; if the transformed usage JSON has no `loc`, show a clearly labeled source-search fallback with the matched term and line. Do not stop at the root module file name.
 - Re-export handling: `export { Foo } from "./foo"` and `export * from "./foo"` are intermediate edges, not terminal roots, unless the barrel itself is the terminal consumer.
 - Cap reporting: depth, branch, chain-count, missing-source, and unknown-export caps must be counted in the JSON/Markdown output.
 - Root dedupe: count one terminal root at most once per target export. Keep raw chain count separately.
@@ -459,6 +460,7 @@ Report at minimum:
 - top target exports per leading root
 - per-root export details for every impacted target export, not only the top exports; each detail must include a code snippet and a chain-backed "why used" explanation
 - representative chains for the leading roots, with dependency locations and referenced specifiers
+- root-module trigger snippets for the leading roots: the import/call/re-export line inside the root module that leads into the chain, with exact `loc` when available and an explicit fallback label when found by search
 - data-quality limits such as no-chain records, capped chains, missing source, or side-effect/unknown terminals
 
 ### Root-cause classification
