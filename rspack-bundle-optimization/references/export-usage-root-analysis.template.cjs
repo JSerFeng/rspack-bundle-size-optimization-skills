@@ -285,6 +285,7 @@ function main() {
   const materializedByResource = buildMaterializedMap(optionalReportPath);
   const roots = new Map();
   const categoryExportKeys = new Map();
+  const categoryModuleKeys = new Map();
   const categoryRootKeys = new Map();
   const noChain = [];
 
@@ -346,6 +347,7 @@ function main() {
     const classification = classifyRoot(row.root, row.terminalKinds, sourceForResource(row.root, materializedByResource));
     addToMapSet(categoryRootKeys, classification.category, row.root);
     for (const key of row.impactedExports) addToMapSet(categoryExportKeys, classification.category, key);
+    for (const key of row.impactedModules) addToMapSet(categoryModuleKeys, classification.category, key);
     const verdict = computeUsageVerdict(classification.category, row.coarseChainCount, row.chainCount);
     return {
       root: row.root,
@@ -360,6 +362,7 @@ function main() {
       coarseSharePct: Math.round(verdict.coarseShare * 100),
       impactedExportCount: row.impactedExports.size,
       impactedModuleCount: row.impactedModules.size,
+      topImpactedModules: Array.from(row.impactedModules).sort().slice(0, 12).map(prettyPath),
       chainCount: row.chainCount,
       terminalKinds: Object.fromEntries(Array.from(row.terminalKinds.entries()).sort((a, b) => b[1] - a[1])),
       featureFlags: classification.featureFlags,
@@ -372,12 +375,18 @@ function main() {
   const categoryRows = Array.from(categoryExportKeys.entries()).map(([category, exportSet]) => ({
     category,
     impactedExportCount: exportSet.size,
+    impactedModuleCount: categoryModuleKeys.get(category)?.size || 0,
     rootCount: categoryRootKeys.get(category)?.size || 0,
     topRoots: rootRows
       .filter((row) => row.category === category)
       .slice(0, 8)
-      .map((row) => ({ root: row.prettyRoot, impactedExportCount: row.impactedExportCount, chainCount: row.chainCount })),
-  })).sort((a, b) => b.impactedExportCount - a.impactedExportCount);
+      .map((row) => ({
+        root: row.prettyRoot,
+        impactedExportCount: row.impactedExportCount,
+        impactedModuleCount: row.impactedModuleCount,
+        chainCount: row.chainCount,
+      })),
+  })).sort((a, b) => b.impactedExportCount - a.impactedExportCount || b.impactedModuleCount - a.impactedModuleCount);
 
   // ---- PER-EXPORT verdict (the primary unit) ----
   // Every used export gets a verdict, derived from where its retention chains
@@ -435,6 +444,7 @@ function main() {
       root: r.prettyRoot,
       verdict: r.usageVerdict,
       impactedExportCount: r.impactedExportCount,
+      impactedModuleCount: r.impactedModuleCount,
       rewriteHint: r.rewriteHint,
       sampleExports: r.examples.slice(0, 8).map((e) => `${e.target} :: ${e.exportName}`),
     }));
@@ -444,9 +454,10 @@ function main() {
   // reachability vs over-retention vs unverified.
   const verdictDistribution = {};
   for (const row of rootRows) {
-    const v = (verdictDistribution[row.usageVerdict] ||= { roots: 0, impactedExports: 0 });
+    const v = (verdictDistribution[row.usageVerdict] ||= { roots: 0, impactedExports: 0, impactedModules: 0 });
     v.roots += 1;
     v.impactedExports += row.impactedExportCount;
+    v.impactedModules += row.impactedModuleCount;
   }
   const overRetainedSuspects = rootRows
     .filter((row) => row.usageVerdict === 'over-retained-suspect')
@@ -454,6 +465,7 @@ function main() {
     .map((row) => ({
       root: row.prettyRoot,
       impactedExportCount: row.impactedExportCount,
+      impactedModuleCount: row.impactedModuleCount,
       coarseSharePct: row.coarseSharePct,
       rewriteHint: row.rewriteHint,
     }));
@@ -467,7 +479,9 @@ function main() {
     chainCount: rootRows.reduce((sum, row) => sum + row.chainCount, 0),
     uniqueRootCount: rootRows.length,
     uniqueTargetExportCount: new Set(usageRecords.map((item) => `${normalizeResource(item)}\n${normalizeExportName(item)}`)).size,
+    uniqueTargetModuleCount: new Set(usageRecords.map((item) => normalizeResource(item))).size,
     topRootCoverage: rootRows.slice(0, 10).reduce((sum, row) => sum + row.impactedExportCount, 0),
+    topRootModuleCoverage: rootRows.slice(0, 10).reduce((sum, row) => sum + row.impactedModuleCount, 0),
     exportVerdictDistribution,
     overRetainedExportCount: overRetainedExports.length,
     exportsNeedingModelAnalysis,
@@ -502,6 +516,7 @@ function main() {
   lines.push(`- Concrete chain samples: ${summary.chainCount}`);
   lines.push(`- Unique terminal roots: ${summary.uniqueRootCount}`);
   lines.push(`- Unique target exports: ${summary.uniqueTargetExportCount}`);
+  lines.push(`- Unique target modules: ${summary.uniqueTargetModuleCount}`);
   lines.push('');
   lines.push('## Per-Export Usage Verdict (every export)');
   lines.push('');
@@ -533,10 +548,10 @@ function main() {
   lines.push('');
   lines.push(`The script cleared **${summary.exportVerdictDistribution['genuinely-used'] || 0}** exports as genuinely-used (a chain reaches a real entry/route — no judgment needed). The remaining **${summary.exportsNeedingModelAnalysis}** exports across **${summary.confirmationWorklistRootCount}** terminal roots are NOT decided by the script — an agent must read each root's source and judge whether those exports are really used. Work top-down by impact; resolve all exports under a root from one source read; do not stop until every export has a model-confirmed verdict (or record the explicit residual).`);
   lines.push('');
-  lines.push('| root | verdict | exports to confirm | rewrite (if suspect) |');
-  lines.push('| --- | --- | ---: | --- |');
+  lines.push('| root | verdict | exports to confirm | modules to inspect | rewrite (if suspect) |');
+  lines.push('| --- | --- | ---: | ---: | --- |');
   for (const w of confirmationWorklist.slice(0, 60)) {
-    lines.push(`| ${w.root} | ${w.verdict} | ${w.impactedExportCount} | ${w.rewriteHint || ''} |`);
+    lines.push(`| ${w.root} | ${w.verdict} | ${w.impactedExportCount} | ${w.impactedModuleCount} | ${w.rewriteHint || ''} |`);
   }
   if (confirmationWorklist.length > 60) lines.push(`| … and ${confirmationWorklist.length - 60} more roots | | | |`);
   lines.push('');
@@ -544,8 +559,8 @@ function main() {
   lines.push('');
   lines.push('Roll-up of the above by terminal root — whether the exports a root keeps alive are genuinely referenced or only conservatively retained.');
   lines.push('');
-  lines.push('| verdict | roots | impacted exports | meaning |');
-  lines.push('| --- | ---: | ---: | --- |');
+  lines.push('| verdict | roots | impacted exports | impacted modules | meaning |');
+  lines.push('| --- | ---: | ---: | ---: | --- |');
   const verdictMeaning = {
     'genuinely-used': 'real runtime root (entry/route/registration/decorator/value-map); not a bug',
     'over-retained-suspect': 'kept alive mostly via namespace/barrel edges; likely narrowable — see rewrite hint',
@@ -553,16 +568,16 @@ function main() {
     review: 'ordinary chain; inspect source',
   };
   for (const [verdict, stats] of Object.entries(summary.verdictDistribution).sort((a, b) => b[1].impactedExports - a[1].impactedExports)) {
-    lines.push(`| ${verdict} | ${stats.roots} | ${stats.impactedExports} | ${verdictMeaning[verdict] || ''} |`);
+    lines.push(`| ${verdict} | ${stats.roots} | ${stats.impactedExports} | ${stats.impactedModules} | ${verdictMeaning[verdict] || ''} |`);
   }
   lines.push('');
   if (overRetainedSuspects.length > 0) {
     lines.push('### Over-retained suspects (actionable)');
     lines.push('');
-    lines.push('| root | impacted exports | coarse % | rewrite |');
-    lines.push('| --- | ---: | ---: | --- |');
+    lines.push('| root | impacted exports | impacted modules | coarse % | rewrite |');
+    lines.push('| --- | ---: | ---: | ---: | --- |');
     for (const s of overRetainedSuspects) {
-      lines.push(`| ${s.root} | ${s.impactedExportCount} | ${s.coarseSharePct}% | ${s.rewriteHint || ''} |`);
+      lines.push(`| ${s.root} | ${s.impactedExportCount} | ${s.impactedModuleCount} | ${s.coarseSharePct}% | ${s.rewriteHint || ''} |`);
     }
     lines.push('');
   } else {
@@ -571,19 +586,19 @@ function main() {
   }
   lines.push('## Root Cause Categories');
   lines.push('');
-  lines.push('| category | impacted exports | roots | leading roots |');
-  lines.push('| --- | ---: | ---: | --- |');
+  lines.push('| category | impacted exports | impacted modules | roots | leading roots |');
+  lines.push('| --- | ---: | ---: | ---: | --- |');
   for (const category of categoryRows) {
-    const topRoots = category.topRoots.map((root) => `${root.root} (${root.impactedExportCount})`).join('<br>');
-    lines.push(`| ${category.category} | ${category.impactedExportCount} | ${category.rootCount} | ${topRoots} |`);
+    const topRoots = category.topRoots.map((root) => `${root.root} (${root.impactedExportCount} exports / ${root.impactedModuleCount} modules)`).join('<br>');
+    lines.push(`| ${category.category} | ${category.impactedExportCount} | ${category.impactedModuleCount} | ${category.rootCount} | ${topRoots} |`);
   }
   lines.push('');
   lines.push('## Top Common Roots');
   lines.push('');
-  lines.push('| rank | root | category | verdict | coarse % | impacted exports | chains | cause |');
-  lines.push('| ---: | --- | --- | --- | ---: | ---: | ---: | --- |');
+  lines.push('| rank | root | category | verdict | coarse % | impacted exports | impacted modules | chains | cause |');
+  lines.push('| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- |');
   rootRows.slice(0, 30).forEach((row, index) => {
-    lines.push(`| ${index + 1} | ${row.prettyRoot} | ${row.category} | ${row.usageVerdict} | ${row.coarseSharePct}% | ${row.impactedExportCount} | ${row.chainCount} | ${row.cause} |`);
+    lines.push(`| ${index + 1} | ${row.prettyRoot} | ${row.category} | ${row.usageVerdict} | ${row.coarseSharePct}% | ${row.impactedExportCount} | ${row.impactedModuleCount} | ${row.chainCount} | ${row.cause} |`);
   });
   lines.push('');
   lines.push('## Top Root Examples');
@@ -596,6 +611,8 @@ function main() {
     if (row.rewriteHint) lines.push(`- Rewrite: ${row.rewriteHint}`);
     lines.push(`- Retention: ${row.preciseChainCount} precise chains, ${row.coarseChainCount} coarse (namespace/barrel) chains (${row.coarseSharePct}% coarse)`);
     lines.push(`- Impacted exports: ${row.impactedExportCount}`);
+    lines.push(`- Impacted modules: ${row.impactedModuleCount}`);
+    if (row.topImpactedModules.length > 0) lines.push(`- Top impacted modules: ${row.topImpactedModules.join(', ')}`);
     lines.push(`- Chain samples: ${row.chainCount}`);
     lines.push(`- Cause: ${row.cause}`);
     lines.push(`- Feature flags: ${Object.entries(row.featureFlags).filter(([, enabled]) => enabled).map(([name]) => name).join(', ') || 'none'}`);
