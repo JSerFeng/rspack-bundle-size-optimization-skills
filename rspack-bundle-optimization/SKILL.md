@@ -396,6 +396,7 @@ If the repository does not have a script yet, start from `references/export-usag
 4. Inspect the top roots before changing code. Pick candidates whose root class is rewriteable and whose chains point to concrete source dependencies.
 5. After each source rewrite, regenerate the export usage root report and compare:
    - impacted target export count per root
+   - impacted target module count per root
    - raw chain count per root
    - top root category distribution
    - whether the specific root disappeared or moved to a real product entry
@@ -445,6 +446,7 @@ For each `(target module, export)`:
 - inspect all concrete `chains`
 - treat `chain.terminal` as the root/terminal module
 - count a root at most once per target export, even if multiple path samples hit the same root
+- compute `impactedExportCount` as distinct `(target module, export)` retained by the root, and `impactedModuleCount` as distinct target modules retained by the root; do not substitute raw chain count for either metric
 - keep raw chain count separately as a secondary weight
 - group by terminal kind and preserve examples with target module/export and edge count
 - keep representative complete chains for the top roots, not only root names; every high-priority root needs at least one source-backed chain example
@@ -454,10 +456,11 @@ Report at minimum:
 - total export usage records
 - records with concrete chains vs records without concrete chains
 - unique terminal root count
-- top roots by impacted target export count
-- top categories by impacted target export count
+- top roots by impacted target export count **and** impacted target module count
+- top categories by impacted target export count **and** impacted target module count
 - examples for the leading roots
 - top target exports per leading root
+- top impacted modules per leading root, or at minimum the distinct impacted module count per root
 - per-root export details for every impacted target export, not only the top exports; each detail must include a code snippet and a chain-backed "why used" explanation
 - representative chains for the leading roots, with dependency locations and referenced specifiers
 - root-module trigger snippets for the leading roots: the import/call/re-export line inside the root module that leads into the chain, with exact `loc` when available and an explicit fallback label when found by search
@@ -503,7 +506,7 @@ So the complete analysis is: **script enumerates and triages all exports → the
 
 How to do it without drowning:
 
-- **Group by terminal root.** Every export under one root is kept alive by the same mechanism, so one source read of that root (and the chain into it) resolves all of its exports together. Iterate the worklist top-down by `impactedExportCount`.
+- **Group by terminal root.** Every export under one root is kept alive by the same mechanism, so one source read of that root (and the chain into it) resolves all of its exports together. Iterate the worklist top-down by `impactedExportCount` and `impactedModuleCount`; exports show symbol fan-out, while modules show how many distinct files/packages the root actually pulls into the retained graph.
 - **For each root**, read the terminal module and the representative chain, then decide for its exports: *confirmed-used* (the root genuinely invokes/registers/renders them — e.g. an effects-registration chain, a route component, a runtime map), *confirmed-removable* (kept alive only by a namespace/barrel consumption nothing actually calls → apply the rewrite hint), or *still-unknown* (record why).
 - **Fan out for scale.** When the worklist is large (hundreds of roots), spawn subagents — one per root, or one per cluster of related roots/module — each returning a per-export determination for its group. Merge into one ledger. This is where Codex / Claude subagents do the per-export reasoning the script can't.
 - **Loop until covered.** Keep going until every export has an agent-confirmed verdict. If you must stop early, report coverage explicitly (`N of M exports confirmed`, which roots remain) — never let an unread bucket masquerade as analyzed. Silent truncation is the failure mode this whole step exists to prevent.
