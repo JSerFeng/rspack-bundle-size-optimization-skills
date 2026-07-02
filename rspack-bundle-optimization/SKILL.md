@@ -504,6 +504,8 @@ The script verdict is a **triage, not the final word**. `genuinely-used` is mech
 
 So the complete analysis is: **script enumerates and triages all exports → the agent reads source and judges every export the script could not clear.** The analyzer emits `confirmationWorklist` (and a "Model-Confirmation Worklist" table) grouped by terminal root for exactly this.
 
+**Data-first rule for agent analysis**: the agent must read the backing data artifacts directly (`rsdoctor-all-export-usage.json`, `export-usage-root-analysis.json`, `post-loader-sources.jsonl`, and the generated per-export/root ledger JSON or Markdown). Do not use the HTML report as the source of truth for agent verdicts. HTML is only a navigation/readability layer; DOM order, colors, folded state, or rendered text snippets must never be parsed back into analysis. If an HTML report contains a conclusion, it must name the backing JSON/Markdown path that produced it.
+
 How to do it without drowning:
 
 - **Group by terminal root.** Every export under one root is kept alive by the same mechanism, so one source read of that root (and the chain into it) resolves all of its exports together. Iterate the worklist top-down by `impactedExportCount` and `impactedModuleCount`; exports show symbol fan-out, while modules show how many distinct files/packages the root actually pulls into the retained graph.
@@ -893,7 +895,7 @@ Include these sections when the corresponding mode ran:
 
 - retained-unused module counts across rounds, plus the **per-module disposition table** (keep / likely-removable / confirm-by-source / investigate) and the true removable upper bound in bytes;
 - side-effect bailout counts across rounds and a source-backed explanation for any high-gain `sideEffects:false` candidate;
-- export usage: chain coverage, the **per-export usage-verdict distribution** over ALL used exports (genuinely-used / needs-source-confirmation / over-retained-suspect), plus the **per-export ledger after agent confirmation** — every needs-source-confirmation / suspect export resolved by the agent to confirmed-used / confirmed-removable / still-unknown, with coverage (N of M exports confirmed) so no bucket is left unread; then the per-root roll-up (top roots, categories, root verdicts);
+- export usage: chain coverage, the **per-export usage-verdict distribution** over ALL used exports (genuinely-used / needs-source-confirmation / over-retained-suspect), plus the **per-export ledger after agent confirmation** — every needs-source-confirmation / suspect export resolved by the agent to confirmed-used / confirmed-removable / still-unknown, with coverage (N of M exports confirmed) so no bucket is left unread; then the per-root roll-up (top roots, categories, root verdicts). This ledger must be a data artifact (JSON and/or Markdown) generated from `rsdoctor-all-export-usage.json`, `export-usage-root-analysis.json`, and `post-loader-sources.jsonl`, not a conclusion scraped from HTML;
 - Rollup-vs-Rspack gap count, chain coverage, and top actionable bad-pattern candidates;
 - CJS-to-ESM loader hit/skip counts, emitted JS delta, and package-level size delta table;
 - splitChunks tuning results, including entrypoint size, per-group deltas, emitted-JS total, and chunk-count/request-count tradeoff;
