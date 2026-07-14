@@ -1,6 +1,6 @@
 # Rspack Bundle Size Optimization — Claude Code Skill
 
-A [Claude Code](https://claude.com/claude-code) skill for **understanding and reducing bundle size** in Rspack-family builds (`rspack`, `rsbuild`, `rspeedy`). It is evidence-driven: it establishes a reproducible baseline, runs env-gated experiments, quantifies every change in bytes, and stops when only real residuals remain — instead of guessing.
+A skill for **understanding and reducing bundle size** in Rspack-family builds (`rspack`, `rsbuild`, `rspeedy`). It is evidence-driven: it establishes a reproducible baseline, runs env-gated experiments, quantifies every change in bytes, and stops when only real residuals remain — instead of guessing.
 
 ## What it does
 
