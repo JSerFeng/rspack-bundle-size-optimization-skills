@@ -5,7 +5,7 @@
  * Finds modules with usedExports = [] that are still retained due to
  * side-effect bailouts.
  */
-const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('fs');
+const { mkdirSync, writeFileSync } = require('fs');
 const { dirname, extname, isAbsolute, relative, resolve } = require('path');
 
 const JS_LIKE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts']);
@@ -72,12 +72,11 @@ class RetainedUnusedSideEffectsReportPlugin {
       const compilation = stats.compilation;
       const compilerContext = compiler.context;
       const reportPath = resolve(compilerContext, this.options.reportPath ?? './tmp/retained-unused-side-effects-report.md');
-      const candidateJsonPath = resolve(compilerContext, this.options.candidateJsonPath ?? './tmp/retained-unused-side-effects-candidates.json');
+      const reviewResourceJsonPath = resolve(compilerContext, this.options.reviewResourceJsonPath ?? './tmp/retained-unused-side-effects-review-resources.json');
       const summaryJsonPath = resolve(compilerContext, this.options.summaryJsonPath ?? './tmp/retained-unused-side-effects-summary.json');
-      const accumulateEnvName = this.options.accumulateEnvName ?? 'CUSTOM_USE_SIDE_EFFECTS_FALSE_FROM_REPORT';
 
       mkdirSync(dirname(reportPath), { recursive: true });
-      mkdirSync(dirname(candidateJsonPath), { recursive: true });
+      mkdirSync(dirname(reviewResourceJsonPath), { recursive: true });
       mkdirSync(dirname(summaryJsonPath), { recursive: true });
 
       const statsData = stats.toJson({
@@ -138,20 +137,16 @@ class RetainedUnusedSideEffectsReportPlugin {
         })
         .filter(Boolean);
 
-      const freshCandidates = Array.from(
+      // These resources require source/package review. A bailout is not a purity
+      // verdict, so this plugin never calls them removable candidates and never
+      // carries them across runs.
+      const reviewResources = Array.from(
         new Set(
           retainedUnusedEntries
-            .filter((e) => e.sideEffectBailouts.length > 0 && !e.isEntryModule)
+            .filter((e) => e.sideEffectBailouts.length > 0)
             .map((e) => e.resource),
         ),
       ).sort();
-
-      const persistedCandidates =
-        process.env[accumulateEnvName] === 'true' && existsSync(candidateJsonPath)
-          ? (() => { try { const p = JSON.parse(readFileSync(candidateJsonPath, 'utf8')); return Array.isArray(p) ? p.filter((v) => typeof v === 'string') : []; } catch { return []; } })()
-          : [];
-
-      const candidateResources = Array.from(new Set([...persistedCandidates, ...freshCandidates])).sort();
 
       const emittedJSAssets = Array.from(safeInvoke(() => compilation?.getAssets?.()) ?? [])
         .filter((a) => typeof a?.name === 'string' && a.name.endsWith('.js'));
@@ -162,19 +157,33 @@ class RetainedUnusedSideEffectsReportPlugin {
         retainedUnusedJSModuleCount: retainedUnusedEntries.length,
         retainedUnusedWithAnyBailoutCount: retainedUnusedEntries.filter((e) => e.bailouts.length > 0).length,
         retainedUnusedWithSideEffectBailoutCount: retainedUnusedEntries.filter((e) => e.sideEffectBailouts.length > 0).length,
-        uniqueCandidateResourceCount: candidateResources.length,
+        uniqueReviewResourceCount: reviewResources.length,
         emittedJSAssetCount: emittedJSAssets.length,
         emittedJSAssetSize: emittedJSSize,
         retainedUnusedEntries,
-        candidateResources: candidateResources.map((r) => relative(compilerContext, r)),
+        reviewResources: reviewResources.map((r) => relative(compilerContext, r)),
       };
 
-      writeFileSync(candidateJsonPath, JSON.stringify(candidateResources, null, 2) + '\n', 'utf8');
+      writeFileSync(reviewResourceJsonPath, JSON.stringify(reviewResources, null, 2) + '\n', 'utf8');
       writeFileSync(summaryJsonPath, JSON.stringify(summary, null, 2) + '\n', 'utf8');
+      const markdown = [
+        '# Retained Unused Review Worklist',
+        '',
+        `Retained usedExports=[] JS modules: ${summary.retainedUnusedJSModuleCount}`,
+        '',
+        `Resources requiring source/package review: ${summary.uniqueReviewResourceCount}`,
+        '',
+        '> Module sizes describe review scope only. They are not removable bytes or emitted savings.',
+        '',
+        '| resource | module size | side-effect bailout | entry |',
+        '| --- | ---: | --- | --- |',
+        ...retainedUnusedEntries.map((entry) => `| ${entry.relResource.replace(/\|/g, '\\|')} | ${entry.size} | ${entry.sideEffectBailouts.length ? 'yes' : 'no'} | ${entry.isEntryModule ? 'yes' : 'no'} |`),
+      ];
+      writeFileSync(reportPath, markdown.join('\n') + '\n', 'utf8');
 
       console.log(`[RetainedUnused] ${summary.retainedUnusedJSModuleCount} retained unused JS modules`);
       console.log(`[RetainedUnused] ${summary.retainedUnusedWithSideEffectBailoutCount} with side-effect bailout`);
-      console.log(`[RetainedUnused] ${summary.uniqueCandidateResourceCount} unique candidate resources`);
+      console.log(`[RetainedUnused] ${summary.uniqueReviewResourceCount} resources require source/package review`);
       console.log(`[RetainedUnused] Emitted JS: ${emittedJSSize} B`);
       console.log(`[RetainedUnused] Written to ${summaryJsonPath}`);
     });

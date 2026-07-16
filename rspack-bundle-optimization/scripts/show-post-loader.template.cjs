@@ -6,12 +6,13 @@
 // The verdict must come from reading the actual code.
 //
 // Inputs (from export-usage-capture-plugin):
-//   post-loader-sources.jsonl   one {path, markers[], source} per line
-//   post-loader-index.json      { index: { path -> {line, markers[]} } }
+//   post-loader-sources.jsonl   one {path, markers[], sourceQuality, source} per line
+//   post-loader-index.json      { index: { path -> {line, markers[], sourceQuality} } }
 //
 // Usage:
 //   node show-post-loader.cjs --list                     # list modules with artifact markers (candidates to inspect)
 //   node show-post-loader.cjs --list --marker decorator-metadata
+//   node show-post-loader.cjs --list --minified          # list compact/minified-looking captured modules
 //   node show-post-loader.cjs <pathSubstring>            # print a module's full post-loader source (line-numbered)
 //   node show-post-loader.cjs <pathSubstring> --symbol Foo   # show only the lines where Foo is referenced (+context)
 
@@ -43,10 +44,20 @@ function loadLines() { return readFileSync(jsonlPath, 'utf8').split('\n').filter
 if (args.list) {
   const idx = JSON.parse(readFileSync(indexPath, 'utf8')).index || {};
   const rows = Object.entries(idx)
-    .filter(([, v]) => v.markers && v.markers.length && (!args.marker || v.markers.includes(args.marker)))
-    .sort((a, b) => b[1].markers.length - a[1].markers.length);
-  console.log(`${rows.length} modules with artifact markers${args.marker ? ` (${args.marker})` : ''} — inspect each to confirm usage:`);
-  for (const [p, v] of rows) console.log(`  [${v.markers.join(',')}]  ${p}`);
+    .filter(([, v]) => {
+      if (args.minified) return v.sourceQuality && v.sourceQuality.probablyMinified;
+      return v.markers && v.markers.length && (!args.marker || v.markers.includes(args.marker));
+    })
+    .sort((a, b) => {
+      const aq = a[1].sourceQuality || {};
+      const bq = b[1].sourceQuality || {};
+      return (bq.maxLineLength || 0) - (aq.maxLineLength || 0) || (b[1].markers || []).length - (a[1].markers || []).length;
+    });
+  console.log(`${rows.length} captured modules${args.minified ? ' with compact/minified-looking source' : ` with artifact markers${args.marker ? ` (${args.marker})` : ''}`} — inspect each to confirm usage/source quality:`);
+  for (const [p, v] of rows) {
+    const q = v.sourceQuality || {};
+    console.log(`  [${(v.markers || []).join(',') || 'no-marker'}] lines=${q.lineCount || '?'} maxLine=${q.maxLineLength || '?'} compact=${q.probablyMinified ? 'yes' : 'no'}  ${p}`);
+  }
   console.log('\nThese are CANDIDATES to read, not verdicts. Open each with: node show-post-loader.cjs <pathSubstring> --symbol <export>');
   process.exit(0);
 }
@@ -64,7 +75,8 @@ if (matches.length > 5 && !args.symbol) {
 }
 
 for (const m of matches) {
-  console.log(`\n===== ${m.path}  [markers: ${m.markers.join(',') || 'none'}] =====`);
+  const q = m.sourceQuality || {};
+  console.log(`\n===== ${m.path}  [markers: ${(m.markers || []).join(',') || 'none'}; lines=${q.lineCount || '?'}; maxLine=${q.maxLineLength || '?'}; compact=${q.probablyMinified ? 'yes' : 'no'}] =====`);
   const srcLines = m.source.split('\n');
   if (args.symbol) {
     const sym = String(args.symbol);

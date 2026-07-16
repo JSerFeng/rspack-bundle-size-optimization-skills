@@ -1,0 +1,71 @@
+# Analysis 04: Export Usage Roots and Post-Loader Evidence
+
+## Purpose
+
+Explain why every captured export is used, which terminal roots retain it, and which import causes `usedExports:true`. Use the backing data as truth; HTML is only a navigation layer.
+
+## Same-Run Capture
+
+Capture from the same isolated run and compilation family used for the conclusion. Do not join a newer stats file to stale export edges.
+
+For Rspack builds exposing builtin Rsdoctor export-usage edges, add `scripts/export-usage-capture-plugin.template.cjs` behind an audit flag with `concatenateModules:false`, `usedExports:true`, `minimize:false`, and readable loader output. Pass the already imported `rspack` instance into the plugin.
+
+If the compiler lacks the required API, use a project-compatible Rsdoctor capture. Missing edges are `blocked`; never replace them with an unlabeled text-search approximation.
+
+## Pipeline
+
+```bash
+node scripts/build-all-export-usage.template.cjs \
+  --raw <run>/export-usage/rsdoctor-export-usage-raw.json \
+  --out <run>/export-usage/rsdoctor-all-export-usage.json
+
+node scripts/export-usage-root-analysis.template.cjs \
+  --usage <run>/export-usage/rsdoctor-all-export-usage.json \
+  --context <project-root> \
+  --out-dir <run>/export-usage/roots
+```
+
+Capture all used exports, not only Rollup gaps. Preserve direct references, export-to-export propagation, namespace edges, dependency id, request, consumer-side `loc`, bounded chains, terminal kind, and cap counters.
+
+## Chain Correctness
+
+- A target export's chain must continue upstream past barrels until a terminal consumer/root or explicit cap.
+- A chain containing only the target declaration is incomplete.
+- `targetExports===null`, `viaNamespace`, or equivalent is a coarse whole-module edge; preserve it because it can keep every provider export alive.
+- Rsdoctor `loc` belongs to the consumer/post-loader source. Never apply it directly to raw disk source without an approximate label.
+- Count each terminal root once per target export; keep raw chain count separately.
+- Report chain coverage, capped branches, missing sources, unknown exports, and missing locations.
+
+## Per-Export Ledger
+
+Every used export ends in one of:
+
+- `genuinely-used`: at least one complete chain reaches a real runtime consumer;
+- `confirmed-removable`: every chain is coarse/artifact-only and source inspection proves no genuine use;
+- `still-unknown`: exact missing or conflicting evidence is recorded.
+
+The analyzer may mechanically triage records, but the agent must read post-loader reference sites for every unresolved/suspect export. Process the checkpointed worklist locally by default. Use subagents only when higher-priority instructions and the user explicitly permit them.
+
+For a `usedExports:true` provider, first identify the exact consumer import edge that made the namespace live. Read that consumer source at `loc`; do not infer from the provider alone.
+
+## Post-Loader Quality
+
+Run `scripts/show-post-loader.template.cjs --list --minified` and inspect `sourceQuality`. `optimization.minimize:false` is insufficient if a Babel/SWC loader still outputs compact one-line code.
+
+For low-quality source:
+
+1. capture a loader trace;
+2. identify the compactor;
+3. disable loader compaction only for the audit and bust its cache identifier;
+4. recapture and verify line count, maximum line length, and highlighting.
+
+If readable source cannot be produced, mark affected verdicts and the post-loader check `blocked`.
+
+## Required Artifacts
+
+- `rsdoctor-export-usage-raw.json`
+- `rsdoctor-all-export-usage.json`
+- `post-loader-sources.jsonl` and index
+- per-export/root analysis JSON and Markdown
+- source-confirmed export ledger with coverage
+- whole-module import-cause rows

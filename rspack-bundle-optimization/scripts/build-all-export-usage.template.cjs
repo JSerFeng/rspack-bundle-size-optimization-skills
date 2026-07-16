@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 // Transform rspack builtin Rsdoctor exportUsageEdges -> skill's rsdoctor-all-export-usage.json
-// Edge: [originUkey, originExports[]|null, targetUkey, targetExports[]|null]  (origin=consumer, target=provider)
+// Edge: [originUkey, originExports[]|null, targetUkey, targetExports[]|null]
+// or [originUkey, originExports[]|null, targetUkey, targetExports[]|null, dependencyId, loc, request]
+// or object-shaped edge with equivalent fields plus optional loc/request/dependencyId.
+// origin=consumer, target=provider.
 //   originExports===null  => origin consumes at module level => terminal root
 //   targetExports===null  => namespace usage: keeps EVERY export of target alive
 //
-// Output: { usages: [ { resource, exportName, chains: [ { terminal, terminalKind, edges:[{from,to,originExport,targetExport}] } ] } ] }
+// Output:
+// {
+//   usages: [ { resource, exportName, chains: [ { terminal, terminalKind, edges:[{from,to,originExport,targetExport,loc}] } ] } ],
+//   moduleLevelImports: [ { targetResource, originResource, originExport, loc, request, dependencyId } ]
+// }
 //
 // Usage: node build-all-export-usage.cjs --raw rsdoctor-export-usage-raw.json --out rsdoctor-all-export-usage.json
 
@@ -32,10 +39,58 @@ const MAX_EXPAND = Number(args['max-expand'] || 4000); // node expansions per ex
 
 const SIDE_EFFECT_RE = /side[_ ]?effect/i;
 
+function normalizeExportList(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value;
+  return [value];
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeLoc(value) {
+  if (value == null) return null;
+  if (isPlainObject(value)) return value.loc || value.location || value.dependencyLoc || value;
+  return value;
+}
+
+function normalizeRawEdge(edge) {
+  if (Array.isArray(edge)) {
+    const meta = isPlainObject(edge[4]) ? edge[4] : null;
+    const locMeta = isPlainObject(edge[5]) ? edge[5] : null;
+    return {
+      originUkey: edge[0],
+      originExports: normalizeExportList(edge[1]),
+      targetUkey: edge[2],
+      targetExports: normalizeExportList(edge[3]),
+      loc: normalizeLoc(firstDefined(meta?.loc, meta?.location, meta?.dependencyLoc, locMeta?.loc, locMeta?.location, locMeta?.dependencyLoc, edge[5])),
+      request: firstDefined(meta?.request, meta?.dependencyRequest, locMeta?.request, locMeta?.dependencyRequest, edge[6]) || null,
+      dependencyId: firstDefined(meta?.dependencyId, meta?.depId, locMeta?.dependencyId, locMeta?.depId, meta ? undefined : edge[4]) || null,
+    };
+  }
+  return {
+    originUkey: firstDefined(edge.originUkey, edge.origin, edge.fromUkey, edge.from, edge.originModuleUkey),
+    originExports: normalizeExportList(firstDefined(edge.originExports, edge.originExport, edge.fromExports, edge.fromExport)),
+    targetUkey: firstDefined(edge.targetUkey, edge.target, edge.toUkey, edge.to, edge.targetModuleUkey),
+    targetExports: normalizeExportList(firstDefined(edge.targetExports, edge.targetExport, edge.toExports, edge.toExport)),
+    loc: edge.loc || edge.location || edge.dependencyLoc || null,
+    request: edge.request || edge.dependencyRequest || null,
+    dependencyId: edge.dependencyId || edge.depId || null,
+  };
+}
+
 function main() {
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   const modules = raw.modules || [];
-  const edges = raw.edges || [];
+  const edges = (raw.edges || []).map(normalizeRawEdge).filter((edge) => edge.originUkey != null && edge.targetUkey != null);
 
   // ukey -> module
   const modByUkey = new Map();
@@ -45,7 +100,7 @@ function main() {
   // incoming edges grouped by provider (target) ukey
   const incomingByTarget = new Map();
   for (const e of edges) {
-    const tU = e[2];
+    const tU = e.targetUkey;
     if (!incomingByTarget.has(tU)) incomingByTarget.set(tU, []);
     incomingByTarget.get(tU).push(e);
   }
@@ -54,8 +109,8 @@ function main() {
   const usedExports = new Set(); // key `${tU}\n${exp}`
   const namespaceOnlyTargets = new Set();
   for (const e of edges) {
-    const tU = e[2];
-    const tExports = e[3];
+    const tU = e.targetUkey;
+    const tExports = e.targetExports;
     if (tExports && tExports.length) {
       for (const ex of tExports) usedExports.add(`${tU}\n${ex}`);
     } else {
@@ -68,6 +123,23 @@ function main() {
     for (const k of usedExports) { if (k.startsWith(`${tU}\n`)) { hasConcrete = true; break; } }
     if (!hasConcrete) usedExports.add(`${tU}\n*`);
   }
+
+  // Whole-module provider consumption is the root cause behind many
+  // stats-level `usedExports: true` modules. Preserve it as a first-class index
+  // so reports can name the import site that made the provider namespace live.
+  const moduleLevelImports = edges
+    .filter(e => e.targetExports === null)
+    .map(e => ({
+      targetUkey: e.targetUkey,
+      targetResource: pathOf(e.targetUkey),
+      originUkey: e.originUkey,
+      originResource: pathOf(e.originUkey),
+      originExport: e.originExports === null ? null : e.originExports,
+      loc: e.loc || null,
+      request: e.request || null,
+      dependencyId: e.dependencyId || null,
+      importShape: e.originExports === null ? 'module-level-consumer' : 'export-propagation',
+    }));
 
   const terminalKindOf = u => {
     const m = modByUkey.get(u);
@@ -100,7 +172,7 @@ function main() {
       // edges whose target export set includes fr.exp, OR is namespace (null => keeps all alive),
       // OR fr.exp === '*' (namespace provider record): match all incoming.
       const matching = incoming.filter(e => {
-        const tExports = e[3];
+        const tExports = e.targetExports;
         if (fr.exp === '*') return true;
         if (tExports === null) return true;          // namespace usage keeps every export alive
         return tExports.indexOf(fr.exp) !== -1;
@@ -117,7 +189,9 @@ function main() {
       }
 
       for (const e of matching) {
-        const [oU, oExports, , tExports] = e;
+        const oU = e.originUkey;
+        const oExports = e.originExports;
+        const tExports = e.targetExports;
         const edgeRec = {
           from: pathOf(oU),
           to: pathOf(fr.ukey),
@@ -127,6 +201,9 @@ function main() {
           // (targetExports === null in the raw edge). Such retention is conservative:
           // the export is kept alive even if no concrete specifier references it.
           viaNamespace: tExports === null,
+          loc: e.loc || null,
+          request: e.request || null,
+          dependencyId: e.dependencyId || null,
         };
         const nextEdges = fr.edges.concat([edgeRec]);
         if (oExports === null) {
@@ -173,6 +250,8 @@ function main() {
     edgeCount: edges.length,
     usageCount: usages.length,
     capsInfo: caps,
+    moduleLevelImportCount: moduleLevelImports.length,
+    moduleLevelImports,
     usages,
   };
   writeFileSync(outPath, JSON.stringify(out));
