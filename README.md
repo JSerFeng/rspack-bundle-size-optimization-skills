@@ -28,9 +28,25 @@ Three things make the analysis *complete* rather than a sampled candidate list:
 
 - A skill-compatible coding environment with local filesystem and shell access.
 - A Rspack/Rsbuild/Rspeedy project to analyze.
-- **Export Usage Roots** mode uses rspack's built-in export-usage graph (`experiments.RsdoctorPlugin({ exportUsageGraph: true })`), which requires **`@rspack/core` >= 2.1.0-beta.0**. Older versions: build a dev binding from `main`, or fall back to `@rsdoctor/rspack-plugin`.
+- **Export Usage Roots** mode uses rspack's built-in export-usage graph (`experiments.RsdoctorPlugin({ exportUsageGraph: true })`), which requires **`@rspack/core` >= 2.1.0**. Older versions: build a dev binding from `main`, or fall back to `@rsdoctor/rspack-plugin`.
 
 ## Install
+
+### Install with the Skills CLI (recommended)
+
+Install into the current project:
+
+```bash
+npx skills add JSerFeng/rspack-bundle-size-optimization-skills --skill rspack-bundle-optimization
+```
+
+To make the skill available across projects, add `--global`:
+
+```bash
+npx skills add JSerFeng/rspack-bundle-size-optimization-skills --skill rspack-bundle-optimization --global
+```
+
+### Install manually
 
 Copy the skill folder into the skills directory used by your coding environment:
 
