@@ -428,13 +428,13 @@ function main() {
     (overRetainedExportsByModule[e.module] ||= []).push(e.exportName);
   }
 
-  // Model-confirmation worklist. The script can mechanically clear `genuinely-used`
+  // Source-review worklist. The script can mechanically clear `genuinely-used`
   // exports (a chain reaches a real entry/route — no judgment needed), but it
   // CANNOT decide `needs-source-confirmation` (side-effect/unknown terminals) or
-  // `over-retained-suspect`. Those need an agent (Claude/Codex) to read the source
-  // and judge per export. Grouping by terminal root is the efficient unit: every
+  // `over-retained-suspect`. Those require source inspection and a per-export
+  // verdict. Grouping by terminal root is the efficient unit: every
   // export sharing a root resolves from the same source read.
-  const exportsNeedingModelAnalysis =
+  const exportsNeedingSourceReview =
     (exportVerdictDistribution['needs-source-confirmation'] || 0) +
     (exportVerdictDistribution['over-retained-suspect'] || 0) +
     (exportVerdictDistribution.review || 0);
@@ -484,7 +484,7 @@ function main() {
     topRootModuleCoverage: rootRows.slice(0, 10).reduce((sum, row) => sum + row.impactedModuleCount, 0),
     exportVerdictDistribution,
     overRetainedExportCount: overRetainedExports.length,
-    exportsNeedingModelAnalysis,
+    exportsNeedingSourceReview,
     confirmationWorklistRootCount: confirmationWorklist.length,
     verdictDistribution,
     overRetainedSuspectRootCount: rootRows.filter((row) => row.usageVerdict === 'over-retained-suspect').length,
@@ -544,9 +544,9 @@ function main() {
     lines.push('_No over-retained exports: every used export reaches a genuine runtime root (or a side-effect/unknown terminal that needs source confirmation). Size is feature-driven._');
     lines.push('');
   }
-  lines.push('## Model-Confirmation Worklist');
+  lines.push('## Source-Review Worklist');
   lines.push('');
-  lines.push(`The script cleared **${summary.exportVerdictDistribution['genuinely-used'] || 0}** exports as genuinely-used (a chain reaches a real entry/route — no judgment needed). The remaining **${summary.exportsNeedingModelAnalysis}** exports across **${summary.confirmationWorklistRootCount}** terminal roots are NOT decided by the script — an agent must read each root's source and judge whether those exports are really used. Work top-down by impact; resolve all exports under a root from one source read; do not stop until every export has a model-confirmed verdict (or record the explicit residual).`);
+  lines.push(`The script cleared **${summary.exportVerdictDistribution['genuinely-used'] || 0}** exports as genuinely-used (a chain reaches a real entry/route — no judgment needed). The remaining **${summary.exportsNeedingSourceReview}** exports across **${summary.confirmationWorklistRootCount}** terminal roots are NOT decided by the script — read each root's source and determine whether those exports are really used. Work top-down by impact; resolve all exports under a root from one source read; do not stop until every export has a source-backed verdict (or record the explicit residual).`);
   lines.push('');
   lines.push('| root | verdict | exports to confirm | modules to inspect | rewrite (if suspect) |');
   lines.push('| --- | --- | ---: | ---: | --- |');

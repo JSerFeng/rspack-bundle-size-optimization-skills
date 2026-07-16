@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Read POST-LOADER module source on demand, so an agent (Claude/Codex) can open each
-// module and confirm — case by case — whether an export is genuinely used or only
+// Read POST-LOADER module source on demand, so each module can be reviewed case by
+// case to determine whether an export is genuinely used or only
 // referenced by an artifact (decorator metadata, injected polyfill, re-export passthrough,
 // helper wrapper, …). This tool only SHOWS source; it makes no genuine-vs-artifact verdict.
-// That judgement is the agent's, from reading the actual code.
+// The verdict must come from reading the actual code.
 //
 // Inputs (from export-usage-capture-plugin):
 //   post-loader-sources.jsonl   one {path, markers[], source} per line
