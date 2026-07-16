@@ -1,7 +1,7 @@
 // @ts-nocheck
 // Capture rspack's builtin Rsdoctor export-usage graph (exportUsageEdges).
 //
-// Requires @rspack/core >= 2.1.0-beta.0 (feat(rsdoctor): expose export usage graph,
+// Requires @rspack/core >= 2.1.0 (feat(rsdoctor): expose export usage graph,
 // #14291). NOT in latest stable 2.0.8 — check `experiments.RsdoctorPlugin` and the
 // `exportUsageGraph` option exist before relying on this; otherwise build a dev
 // binding from rspack main, or fall back to @rsdoctor/rspack-plugin.
@@ -27,7 +27,7 @@ class ExportUsageCapturePlugin {
     const rspack = this.options.rspack || require('@rspack/core');
     const RsdoctorPlugin = rspack.experiments && rspack.experiments.RsdoctorPlugin;
     if (!RsdoctorPlugin || typeof RsdoctorPlugin.getCompilationHooks !== 'function') {
-      console.warn('[ExportUsageCapture] RsdoctorPlugin.getCompilationHooks unavailable — need @rspack/core >= 2.1.0-beta.0; skipping');
+      console.warn('[ExportUsageCapture] RsdoctorPlugin.getCompilationHooks unavailable — need @rspack/core >= 2.1.0; skipping');
       return;
     }
     new RsdoctorPlugin({

@@ -365,7 +365,7 @@ If any of these fields are missing, record the missing field as a data-quality i
 
 ### End-to-end pipeline (capture → transform → analyze)
 
-For rspack's built-in export-usage graph (`@rspack/core` >= 2.1.0-beta.0; the `exportUsageGraph` option is NOT in stable 2.0.8 — verify it exists, else build a dev binding from main or use `@rsdoctor/rspack-plugin`), the skill ships the whole pipeline:
+For rspack's built-in export-usage graph (`@rspack/core` >= 2.1.0; the `exportUsageGraph` option is NOT in stable 2.0.8 — verify it exists, else build a dev binding from main or use `@rsdoctor/rspack-plugin`), the skill ships the whole pipeline:
 
 1. **Capture** — add `references/export-usage-capture-plugin.template.cjs` to the production config behind an env flag, built with `optimization.concatenateModules:false, usedExports:true`. Pass the already-imported `rspack` into the plugin (`new ExportUsageCapturePlugin({ rspack, outDir })`) — a fresh `require('@rspack/core')` inside the `.cjs` can load the CJS dist and crash. It writes `rsdoctor-export-usage-raw.json` (`{modules, edges}`).
 2. **Transform** — `node references/build-all-export-usage.template.cjs --raw rsdoctor-export-usage-raw.json --out rsdoctor-all-export-usage.json`. This reverse-BFSes each used export to its terminal roots, handles the namespace-edge gotcha (a `targetExports===null` edge keeps every export of the provider alive — propagate it; it also marks the resulting chain edges `viaNamespace` so the analyzer can tell precise from coarse retention), and caps depth/branches.
@@ -967,7 +967,7 @@ Read these only when you need them:
 - [references/cjs2esm-package-size-diff.cjs](references/cjs2esm-package-size-diff.cjs)
   Use after a CJS-to-ESM experiment to compare baseline and experiment stats at npm package granularity.
 - [references/export-usage-capture-plugin.template.cjs](references/export-usage-capture-plugin.template.cjs)
-  Capture rspack's builtin Rsdoctor export-usage graph (`exportUsageEdges`) into `rsdoctor-export-usage-raw.json`, AND dump post-loader source (`module.originalSource()`) of first-party + artifact-marker modules into `post-loader-sources.jsonl` (+ `post-loader-index.json`). Needs `@rspack/core` >= 2.1.0-beta.0. First step of the Export Usage Roots pipeline. Computes no verdict.
+  Capture rspack's builtin Rsdoctor export-usage graph (`exportUsageEdges`) into `rsdoctor-export-usage-raw.json`, AND dump post-loader source (`module.originalSource()`) of first-party + artifact-marker modules into `post-loader-sources.jsonl` (+ `post-loader-index.json`). Needs `@rspack/core` >= 2.1.0. First step of the Export Usage Roots pipeline. Computes no verdict.
 - [references/show-post-loader.template.cjs](references/show-post-loader.template.cjs)
   Reads post-loader source on demand for case-by-case genuine-vs-artifact review: `--list` surfaces artifact-marker candidates; `<module> --symbol <export>` shows the actual lines referencing an export. It only shows source — inspection determines the verdict. This is the reference-kind / artifact check (decorator-metadata, polyfill, passthrough, …) done by reading, not by a hard-coded pattern.
 - [references/build-all-export-usage.template.cjs](references/build-all-export-usage.template.cjs)

@@ -77,7 +77,7 @@ rspack-bundle-optimization/
     ├── chunk-group-reachability-plugin.template.cjs   # reachability + interactive chunk graph
     ├── retained-unused-side-effects-plugin.template.cjs # capture usedExports=[] modules + bailouts
     ├── retained-unused-disposition.template.cjs         # per-module verdict + true removable upper bound
-    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges + post-loader source store (rspack >= 2.1.0-beta.0)
+    ├── export-usage-capture-plugin.template.cjs         # capture rspack exportUsageEdges + post-loader source store (rspack >= 2.1.0)
     ├── build-all-export-usage.template.cjs              # edges -> per-export chains to terminal roots
     ├── export-usage-root-analysis.template.cjs          # per-export + per-root usage verdicts
     ├── show-post-loader.template.cjs                    # read post-loader source for reference-kind / artifact review
