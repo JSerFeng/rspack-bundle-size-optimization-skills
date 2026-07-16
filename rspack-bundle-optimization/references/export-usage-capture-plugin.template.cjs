@@ -1,7 +1,7 @@
 // @ts-nocheck
 // Capture rspack's builtin Rsdoctor export-usage graph (exportUsageEdges).
 //
-// Requires @rspack/core >= 2.1.0-beta.0 (feat(rsdoctor): expose export usage graph,
+// Requires @rspack/core >= 2.1.0 (feat(rsdoctor): expose export usage graph,
 // #14291). NOT in latest stable 2.0.8 — check `experiments.RsdoctorPlugin` and the
 // `exportUsageGraph` option exist before relying on this; otherwise build a dev
 // binding from rspack main, or fall back to @rsdoctor/rspack-plugin.
@@ -27,7 +27,7 @@ class ExportUsageCapturePlugin {
     const rspack = this.options.rspack || require('@rspack/core');
     const RsdoctorPlugin = rspack.experiments && rspack.experiments.RsdoctorPlugin;
     if (!RsdoctorPlugin || typeof RsdoctorPlugin.getCompilationHooks !== 'function') {
-      console.warn('[ExportUsageCapture] RsdoctorPlugin.getCompilationHooks unavailable — need @rspack/core >= 2.1.0-beta.0; skipping');
+      console.warn('[ExportUsageCapture] RsdoctorPlugin.getCompilationHooks unavailable — need @rspack/core >= 2.1.0; skipping');
       return;
     }
     new RsdoctorPlugin({
@@ -65,15 +65,15 @@ class ExportUsageCapturePlugin {
     // `.ts` on disk does NOT show: decorator emit (`_ts_metadata`/`_ts_decorate`),
     // injected polyfills, re-export passthroughs, helper wrappers, etc.
     //
-    // This does NOT decide anything. It just makes the post-loader source readable so
-    // an agent (Claude/Codex) can open each module and confirm, case by case, whether
-    // an export is genuinely used or only referenced by an artifact. Hard-coding a
+    // This does NOT decide anything. It makes the post-loader source readable so each
+    // module can be reviewed case by case to determine whether an export is genuinely
+    // used or only referenced by an artifact. Hard-coding a
     // single pattern (e.g. a `_ts_metadata` regex) would miss every other artifact shape;
-    // the judgement is the agent's, from reading the actual code.
+    // the verdict must come from reading the actual code.
     //
     // Output:
     //   post-loader-sources.jsonl   one {path, bytes, markers[]} + source per line (first-party + any marker-bearing module)
-    //   post-loader-index.json      { path -> {line, bytes, markers[]} }  so the agent/helper can locate a module fast
+    //   post-loader-index.json      { path -> {line, bytes, markers[]} }  so a reviewer/helper can locate a module fast
     const ARTIFACT_MARKERS = [
       ['decorator', /_ts_decorate|__decorate\(/],
       ['decorator-metadata', /_ts_metadata|__metadata\(|Reflect\.metadata|design:(type|paramtypes|returntype)/],
@@ -98,7 +98,7 @@ class ExportUsageCapturePlugin {
           if (!src) continue;
           scanned++;
           const markers = ARTIFACT_MARKERS.filter(([, re]) => re.test(src)).map(([k]) => k);
-          // Capture first-party modules (where the agent can act) and any module that
+          // Capture first-party modules (where source changes are possible) and any module that
           // shows an artifact marker (where genuine-vs-artifact must be confirmed).
           if (!isFirstParty(resource) && markers.length === 0) continue;
           index[resource] = { line: lineNo, bytes: src.length, markers };
