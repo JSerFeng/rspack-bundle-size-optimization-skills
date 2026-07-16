@@ -19,43 +19,9 @@ Produce evidence, not guesses:
 4. Quantify gains in bytes and percent.
 5. Stop when the remaining candidates are entries, real side effects, or tiny residuals.
 
-## Mode Selection
+## Workflow
 
-On the first broad bundle-optimization request, briefly show the available modes once and recommend **Quick Triage**. Do not block on a choice unless the next step is expensive, changes build config, or will generate large artifacts.
-
-If the user names a mode, run that mode directly. If the user says "全部", "一起做", "full", or similar, use **Full Pipeline** and confirm expected runtime/artifacts before the expensive run.
-
-Available modes:
-
-- **Quick Triage** (default): capture baseline size, output location, largest assets/modules, existing stats, and recommend the next mode from evidence.
-- **Reachability**: analyze chunk-group reachability to detect async/shared chunks carrying modules the group does not need.
-- **Retained Unused**: inspect `usedExports = []` modules, optimization bailouts, and side-effect candidates. Run with `concatenateModules: false` for discovery, then give EVERY such module a per-module disposition (keep / likely-removable / confirm-by-source / investigate) with evidence — not just a flat candidate list.
-- **Side Effects Experiment**: env-gated `sideEffects: false` candidate experiments with before/after emitted JS deltas.
-- **Export Usage Roots**: analyze all Rspack/Rsdoctor export usage chains, without Rollup comparison, and give EVERY used export a usage verdict (genuinely-used / needs-source-confirmation / over-retained-suspect) from where its chains terminate — so each export is individually verified, then rolled up to terminal roots and root-cause categories. Includes a reference-kind artifact check that inspects post-loader source at each reference site to confirm genuine use vs artifact "use" (decorator-metadata, injected polyfill, passthrough) — by reading, not a hard-coded pattern.
-- **Rollup Diff**: compare Rollup vs Rspack export usage to find source-level bad-pattern hypotheses. Require reference chains and source inspection before calling a gap actionable.
-- **CJS-to-ESM Experiment**: use the experimental loader to estimate package-patch upside if transpiled CJS became real ESM.
-- **SplitChunks**: test cacheGroup `name` removal, `minSize: 0`, and shared-chunk tuning when reachability points to shared chunk fan-in.
-- **ECMA Level Experiment**: temporarily raise the output ECMA/syntax level in BOTH the transform (babel/swc) and the minifier (terser/swc) as a diagnostic comparison. The goal is not to recommend changing the production browser-support level by default; it is to find which modules disappear, which modules shrink, which source syntax caused the old-target bloat, and which local rewrites could recover size without changing the project's ECMA level.
-- **Full Pipeline**: run Quick Triage, then the relevant analysis modes in evidence order; use this only when the user wants a comprehensive investigation.
-
-Suggested first response for a broad request:
-
-```text
-I can run Quick Triage (recommended), Reachability, Retained Unused, Export Usage Roots, Rollup Diff, CJS-to-ESM Experiment, Side Effects Experiment, SplitChunks, or Full Pipeline. I will start with Quick Triage unless you want a specific mode.
-```
-
-Routing shortcuts:
-
-- "rollup diff", "gap", "Rollup vs Rspack" -> Rollup Diff
-- "export usage", "exports used chain", "usage chain", "公共 root", "root 根因" -> Export Usage Roots
-- "去掉 rollup gap", "所有 export used 链条", "all used export chains" -> Export Usage Roots; the input snapshot must include all captured used exports, not only gap exports
-- "cjs2esm", "esm loader", "transpiled cjs" -> CJS-to-ESM Experiment
-- "chunk", "拆包", "shared chunk", "reachability" -> Reachability, then SplitChunks if shared chunk fan-in is confirmed
-- "usedExports", "bailout", "side effects" -> Retained Unused, then Side Effects Experiment if candidates look safe
-- "ecma", "es2022", "es 版本", "提高 ecma", "syntax level", "target", "tools.swc", "minify target", "swc target", "降级", "downlevel", "babel/swc target" -> ECMA Level Experiment
-- "全部", "一起做", "full pipeline" -> Full Pipeline
-
-## Quick Start
+Execute this workflow end to end. Treat a specific concern as emphasis and still evaluate every stage in order. Skip a stage only when earlier evidence proves it inapplicable; record that evidence and the stopping reason in the final report.
 
 1. Find the production build entrypoint:
    - direct `rspack -c ...`
@@ -67,7 +33,8 @@ Routing shortcuts:
    - emitted JS asset count
    - emitted JS asset size sum
    - largest JS assets
-5. Run the analysis in this order:
+5. Run every analysis stage in this order:
+   - check Rspack optimization configuration
    - chunk-group reachability
    - retained-unused plus optimization bailout (with `concatenateModules: false`)
    - side-effects experiments
@@ -93,7 +60,31 @@ Good baseline questions:
 - Is the problem accidental inclusion, or are the async loads themselves huge?
 - Is the gain likely in split-chunks cleanup, side-effects cleanup, duplicate deps, or route-level fan-in?
 
-## Analysis 1: Chunk Group Reachability
+## Analysis 1: Check Optimization Configuration
+
+Capture the effective production config with `references/optimization-config-check-plugin.template.cjs`; do not infer resolved values from the author-written config or serialize all of `compiler.options`.
+
+1. Copy the template into the target repo and register it behind `RSPACK_OPT_CONFIG=1`.
+   - Direct Rspack: append it to `plugins`.
+   - Rsbuild: append it from `tools.rspack` with `appendPlugins`.
+   - Other frameworks: inject it through their final Rspack-config mutation API.
+2. Run the unchanged production build with only `RSPACK_OPT_CONFIG=1` added.
+3. Require `tmp/rspack-optimization/optimization-config*.json` for every top-level production compiler. If an artifact is missing or represents the wrong build target, fix the integration and rerun; do not fall back to the source config.
+
+It captures only size-related fields, summarizes non-serializable values with bounded depth and width, and skips unchanged writes.
+
+- **Pruning** — `mode`, `optimization.nodeEnv`, `providedExports`, `usedExports`, `sideEffects`, `innerGraph`, `concatenateModules`, and supported `inlineExports`.
+- **Minification and naming** — `minimize`, all active JavaScript and CSS `minimizer` entries, and `mangleExports`. When `minimizer` is authored explicitly, verify from source whether `"..."` preserves the defaults or the custom list replaces them.
+- **Chunk cleanup and layout** — `mergeDuplicateChunks`, `removeEmptyChunks`, `splitChunks`, `runtimeChunk`, `chunkIds`, and `moduleIds`.
+- **ESM library builds** — `avoidEntryIife` when supported and its single-entry constraint applies.
+
+Take resolved values only from the JSON artifact. Determine provenance by comparing the author config, framework mutations, and version-matched default; use `explicit`, `framework`, or `default`, and record `unknown` rather than guessing when provenance cannot be proved.
+
+Write `optimization-config-check.md` with one row per option: resolved value, version default, provenance, status (`ok` / `suspect` / `experiment` / `n/a`), likely size impact, evidence, and next action. Mark disabled production pruning/minification and unexpected overrides as `suspect`; mark size-oriented alternatives as `experiment`.
+
+Run every suspect or experiment independently and env-gated against the original production baseline, restoring the original config before the next test. Correct unexpectedly disabled core pruning or minification before Analysis 2, then recapture the config and size. Keep `concatenateModules: false` only in diagnostics that require it.
+
+## Analysis 2: Chunk Group Reachability
 
 Use this to answer:
 
@@ -205,9 +196,9 @@ The graph data is also written as `chunk-graph.json` for programmatic consumptio
 - If async groups are massive but removable JS-like size is zero, the problem is route/block fan-in, not accidental membership.
 - **If removable modules are all polyfills (core-js, @swc/helpers) from a shared chunk**: these are likely injected by SWC's `env.mode: "usage"` into non-JS-source modules (e.g., SVG via @svgr/webpack), causing the shared polyfill chunk to carry modules that most async pages don't need. The fix is either:
   1. Remove `mode: "usage"` from non-primary loaders (e.g., SVG loader chain), or
-  2. Tune splitChunks (see Analysis 6).
+  2. Tune splitChunks (see Analysis 8).
 
-## Analysis 2: Retained Unused Exports Plus Bailouts
+## Analysis 3: Retained Unused Exports Plus Bailouts
 
 Use this to answer:
 
@@ -276,7 +267,7 @@ Only the **likely-removable** set (plus any **confirm-by-source** the source pro
 
 CJS modules (`usedExports=null`) are a separate, out-of-scope bucket — `sideEffects:false` cannot help them; note their count for context but do not disposition them here.
 
-## Analysis 3: Side Effects Experiments
+## Analysis 4: Side Effects Experiments
 
 Use this to answer:
 
@@ -314,15 +305,11 @@ Focus effort on ESM candidates. They typically come from `node_modules` packages
 
 Without union accumulation, round 2 may only test the latest residual candidates and accidentally drop the already-proven profitable set.
 
-## Analysis 4: Export Usage Roots
+## Analysis 5: Export Usage Roots
 
-Use this to answer:
+Analyze `exportsUsage` for every export Rspack marks as used.
 
-"Across all exports that Rspack marks used, which terminal roots keep the most exports alive, and what broad root-cause class dominates?"
-
-This mode does **not** compare against Rollup and should not filter to Rollup gap exports. It is useful when the question is about the shape of the real Rspack export usage graph rather than a Rollup-vs-Rspack difference.
-
-This mode has three required outputs:
+Produce:
 
 1. **Export-used chain analysis**: for every captured target export, show the concrete chain that keeps it used, including intermediate re-exports, specifier dependencies, dependency locations, and terminal/root module. A selected target export view is only a drill-down into this complete dataset.
 2. **Common-root aggregation**: across all captured used exports, group those chains by terminal/root module so the largest shared root causes are visible.
@@ -342,11 +329,11 @@ Prefer Rspack/Rsdoctor `exportsUsage` data that preserves export-to-export chain
 - bounded `chains` from terminal/root modules to the target export
 - terminal/root kind, for example `no-export-incoming` or `module-side-effect-or-unknown-export`
 
-For this mode, the payload must represent **all captured used exports** from Rspack, not only exports that differ from Rollup. A gap-filtered payload is acceptable for Rollup Diff, but it is invalid for common-root conclusions because it hides roots that retain many used exports outside the gap set.
+For this stage, the payload must represent **all captured used exports** from Rspack, not only exports that differ from Rollup. A gap-filtered payload is acceptable for Rollup Diff, but it is invalid for common-root conclusions because it hides roots that retain many used exports outside the gap set.
 
 If a prior capture already wrote `rsdoctor-all-export-usage.json`, consume that file directly. Use `rsdoctor-filtered-export-usage.json` only for Rollup Diff or as an explicitly labeled fallback when an all-used capture is unavailable.
 
-If the project uses Rspack's built-in Rsdoctor integration, prefer its `exportsUsage` output as the source of truth. The important requirement is preserving export-to-export chains and terminal/root kind; stats-only `usedExports` is not enough for this mode because it cannot answer which upstream root keeps a specific export alive.
+If the project uses Rspack's built-in Rsdoctor integration, prefer its `exportsUsage` output as the source of truth. The important requirement is preserving export-to-export chains and terminal/root kind; stats-only `usedExports` is not enough for this stage because it cannot answer which upstream root keeps a specific export alive.
 
 ### Capture requirements
 
@@ -544,7 +531,7 @@ Do not call every common root a bug. Separate:
 
 A high-priority candidate is a root that impacts many exports and has a rewriteable source pattern. Typical fixes are splitting broad utility modules, importing narrower helpers, moving side-effectful registration away from pure exports, replacing dynamic constructor maps with narrower lazy maps, or isolating decorator-bearing facades from heavy helper imports.
 
-## Analysis 5: Rollup-vs-Rspack Export Diff
+## Analysis 6: Rollup-vs-Rspack Export Diff
 
 Use this to answer:
 
@@ -608,7 +595,7 @@ Deprioritize or mark as residual when:
 - Rollup warns about circular chunk re-exports that could change execution order
 - CommonJS remains statically incomparable after `@rollup/plugin-commonjs`
 
-## Analysis 6: CJS-to-ESM Loader Experiments
+## Analysis 7: CJS-to-ESM Loader Experiments
 
 Use this to answer:
 
@@ -698,7 +685,7 @@ Stop when one of these is true:
 - the next round gain is tiny
 - the regression risk outweighs the measured bytes saved
 
-## Analysis 7: SplitChunks Tuning
+## Analysis 8: SplitChunks Tuning
 
 Use this to answer:
 
@@ -755,7 +742,7 @@ With `minSize: 0`, even tiny shared modules get extracted into their own shared 
 - More chunks = more HTTP requests. For HTTP/2 this is usually fine.
 - Named chunks are easier to debug. Consider using `name` as a function for readable chunk names in development, while omitting it in production.
 
-## Analysis 8: ECMA Level Experiment
+## Analysis 9: ECMA Level Experiment
 
 Use this to answer:
 
@@ -891,8 +878,9 @@ Each optimization card must include:
 
 ### Required analysis content
 
-Include these sections when the corresponding mode ran:
+Include these sections for every stage that produced data:
 
+- check optimization configuration: `optimization-config*.json`, installed Rspack version, resolved production values and provenance, deviations from version-matched defaults, size-impact hypotheses, and measured correction experiments;
 - retained-unused module counts across rounds, plus the **per-module disposition table** (keep / likely-removable / confirm-by-source / investigate) and the true removable upper bound in bytes;
 - side-effect bailout counts across rounds and a source-backed explanation for any high-gain `sideEffects:false` candidate;
 - export usage: chain coverage, the **per-export usage-verdict distribution** over ALL used exports (genuinely-used / needs-source-confirmation / over-retained-suspect), plus the **per-export ledger after source review** — every needs-source-confirmation / suspect export resolved through source inspection to confirmed-used / confirmed-removable / still-unknown, with coverage (N of M exports confirmed) so no bucket is left unread; then the per-root roll-up (top roots, categories, root verdicts). This ledger must be a data artifact (JSON and/or Markdown) generated from `rsdoctor-all-export-usage.json`, `export-usage-root-analysis.json`, and `post-loader-sources.jsonl`, not a conclusion scraped from HTML;
@@ -958,10 +946,12 @@ This skill is successful when it leaves the repo with:
 
 Read these only when you need them:
 
+- [references/optimization-config-check-plugin.template.cjs](references/optimization-config-check-plugin.template.cjs)
+  Capture the normalized, effective Rspack optimization config from `compilation.options`. Use for direct Rspack, Rsbuild, Rspeedy, or framework builds where author-written config does not show the final values. It captures only size-related fields, defaults to root compilations, and avoids unchanged writes.
 - [references/retained-unused-side-effects-plugin.template.cjs](references/retained-unused-side-effects-plugin.template.cjs)
   Use when you want a starting plugin for retained-unused plus side-effects reporting, candidate JSON generation, and round-by-round accumulation.
 - [references/retained-unused-disposition.template.cjs](references/retained-unused-disposition.template.cjs)
-  Run over the plugin's `retained-unused-side-effects-summary.json` to give EVERY usedExports=[] module a disposition (keep / likely-removable / confirm-by-source / investigate) with a source snippet, and to compute the true removable upper bound. This is what makes Analysis 2 complete instead of a flat candidate list.
+  Run over the plugin's `retained-unused-side-effects-summary.json` to give EVERY usedExports=[] module a disposition (keep / likely-removable / confirm-by-source / investigate) with a source snippet, and to compute the true removable upper bound. This is what makes Analysis 3 complete instead of a flat candidate list.
 - [references/chunk-group-reachability-plugin.template.cjs](references/chunk-group-reachability-plugin.template.cjs)
   Use when you want a starting plugin for chunk-group reachability analysis with correct BFS traversal and async root finding.
 - [references/cjs2esm-package-size-diff.cjs](references/cjs2esm-package-size-diff.cjs)
