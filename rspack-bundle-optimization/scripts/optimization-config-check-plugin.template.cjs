@@ -23,6 +23,7 @@
  *   }
  */
 const { mkdirSync, readFileSync, writeFileSync } = require('fs');
+const assert = require('assert');
 const { resolve } = require('path');
 
 const PLUGIN_NAME = 'OptimizationConfigCheckPlugin';
@@ -49,6 +50,7 @@ const SPLIT_CHUNKS_KEYS = [
   'chunks',
   'defaultSizeTypes',
   'minSize',
+  'minSizeReduction',
   'minRemainingSize',
   'minChunks',
   'maxAsyncRequests',
@@ -68,6 +70,7 @@ const CACHE_GROUP_KEYS = [
   'filename',
   'priority',
   'minSize',
+  'minSizeReduction',
   'minRemainingSize',
   'minChunks',
   'maxAsyncRequests',
@@ -156,6 +159,17 @@ function summarizeSplitChunks(splitChunks) {
   return result;
 }
 
+function rspackVersionInfo(activeCompiler, fallbackCompiler) {
+  const candidates = [
+    ['compiler.rspack.rspackVersion', activeCompiler?.rspack?.rspackVersion],
+    ['fallbackCompiler.rspack.rspackVersion', fallbackCompiler?.rspack?.rspackVersion],
+    ['compiler.rspack.version', activeCompiler?.rspack?.version],
+    ['fallbackCompiler.rspack.version', fallbackCompiler?.rspack?.version],
+  ];
+  const row = candidates.find(([, value]) => typeof value === 'string' && value.length > 0);
+  return row ? { value: row[1], source: row[0] } : { value: null, source: null };
+}
+
 function captureOptions(compilation, fallbackCompiler) {
   const activeCompiler = compilation.compiler || fallbackCompiler || {};
   const options = compilation.options || activeCompiler.options || {};
@@ -171,11 +185,13 @@ function captureOptions(compilation, fallbackCompiler) {
     ? optimization.minimizer.map(summarizePlugin)
     : summarize(optimization.minimizer);
   capturedOptimization.splitChunks = summarizeSplitChunks(optimization.splitChunks);
+  const version = rspackVersionInfo(activeCompiler, fallbackCompiler);
 
   return {
     schemaVersion: 1,
     source: 'compilation.options',
-    rspackVersion: activeCompiler.rspack?.version || fallbackCompiler?.rspack?.version || null,
+    rspackVersion: version.value,
+    rspackVersionSource: version.source,
     compiler: {
       name: activeCompiler.name || options.name || null,
       context: activeCompiler.context || options.context || null,
@@ -188,6 +204,37 @@ function captureOptions(compilation, fallbackCompiler) {
     },
     optimization: capturedOptimization,
   };
+}
+
+function selfTest() {
+  const compiler = {
+    name: 'web',
+    context: '/fixture',
+    rspack: { rspackVersion: '2.1.4', version: '5.75.0' },
+  };
+  const snapshot = captureOptions({
+    compiler,
+    options: {
+      name: 'web',
+      context: '/fixture',
+      mode: 'production',
+      optimization: {
+        splitChunks: {
+          minSize: 100_000,
+          minSizeReduction: 400_000,
+          enforceSizeThreshold: 50_000,
+          cacheGroups: {
+            default: { minSize: 100_000, minSizeReduction: 400_000 },
+          },
+        },
+      },
+    },
+  }, compiler);
+  assert.equal(snapshot.rspackVersion, '2.1.4');
+  assert.equal(snapshot.rspackVersionSource, 'compiler.rspack.rspackVersion');
+  assert.equal(snapshot.optimization.splitChunks.minSizeReduction, 400_000);
+  assert.equal(snapshot.optimization.splitChunks.cacheGroups.default.minSizeReduction, 400_000);
+  process.stdout.write('optimization-config-check-plugin self-test passed\n');
 }
 
 function safeFilePart(value) {
@@ -234,3 +281,5 @@ module.exports = {
   OptimizationConfigCheckPlugin,
   captureOptions,
 };
+
+if (require.main === module && process.argv.includes('--self-test')) selfTest();

@@ -1,5 +1,21 @@
 # Analysis 03: Side-Effects Source and Package Audit
 
+## Contents
+
+- [Purpose](#purpose)
+- [Safety Rule](#safety-rule)
+- [Build the Review Worklist](#build-the-review-worklist)
+- [Agent Review for Every Candidate](#agent-review-for-every-candidate)
+- [Decision Ledger](#decision-ledger)
+- [A/B Experiment](#ab-experiment)
+- [Required Artifacts](#required-artifacts)
+- [Reporting](#reporting)
+- [Completion Gate](#completion-gate)
+
+## Purpose
+
+Resolve every retained-unused side-effect candidate through complete source and package review, then measure only agent-confirmed safe experiments in a production-comparable build.
+
 ## Safety Rule
 
 Never treat `node_modules`, ESM syntax, an absent `sideEffects` field, `usedExports=[]`, or a bailout string as proof of purity. The agent must inspect the source and package before approving any experiment.
@@ -93,6 +109,15 @@ Build into a new isolated output directory. Compare:
 
 Run the project's relevant runtime smoke tests before calling the change production-ready. Accumulate approved candidates by explicit union; never carry a module forward after its source changes without re-review.
 
+## Required Artifacts
+
+- complete `side-effects-review-worklist.json` and immutable source artifacts;
+- fresh disk-source, post-loader-source, and package hashes;
+- agent-authored `side-effects-decisions.json`;
+- merged retained-unused disposition JSON and Markdown;
+- production A/B asset manifests and raw/gzip comparison;
+- build and runtime/test validation results.
+
 ## Reporting
 
 Report separately:
@@ -103,3 +128,11 @@ Report separately:
 - exact source/package evidence for every experimented module.
 
 Zero safe candidates after every row is reviewed is evidence-backed `completed-no-op`.
+
+## Completion Gate
+
+The agent, not the user, processes every worklist entry. Decision coverage must
+be exactly `reviewed == reviewCount`, with zero `unknown`, stale hashes,
+`source-review-required`, or unreadable post-loader sources. In `optimize` mode,
+a hash-valid safe candidate must proceed through the production A/B and strict
+auto-apply gate; otherwise record its concrete residual risk and do not edit.

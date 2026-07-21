@@ -57,3 +57,12 @@ Keep only results whose route-level benefit, global bytes, request count, and ru
 - request/chunk/duplication comparison
 - refreshed reachability and chunk graph
 - decision with runtime validation command
+
+## Completion Gate
+
+Review every reachability-backed cache-group target and every tested knob as a
+separate candidate. A size win with changed requests, loading order, cache
+behavior, route membership, or CSS grouping has residual risk and must not be
+promoted without route/runtime evidence that clears each point. After an
+accepted change, refresh the baseline, reachability, chunk graph, and all later
+checks in a new pass.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rspack Bundle Optimization"
+  short_description: "Exhaustively audit and safely optimize Rspack bundles"
+  default_prompt: "Use $rspack-bundle-optimization to audit this project's production bundle, apply only fully validated optimizations with no observed residual risk, and continue to a measured fixed point."

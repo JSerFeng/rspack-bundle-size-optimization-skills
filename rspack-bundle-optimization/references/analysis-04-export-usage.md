@@ -1,4 +1,4 @@
-# Analysis 04: Export Usage Roots and Post-Loader Evidence
+# Analysis 04: Export Usage Roots and Whole-Module Causes
 
 ## Purpose
 
@@ -48,18 +48,9 @@ The analyzer may mechanically triage records, but the agent must read post-loade
 
 For a `usedExports:true` provider, first identify the exact consumer import edge that made the namespace live. Read that consumer source at `loc`; do not infer from the provider alone.
 
-## Post-Loader Quality
+## Evidence Handoff
 
-Run `scripts/show-post-loader.template.cjs --list --minified` and inspect `sourceQuality`. `optimization.minimize:false` is insufficient if a Babel/SWC loader still outputs compact one-line code.
-
-For low-quality source:
-
-1. capture a loader trace;
-2. identify the compactor;
-3. disable loader compaction only for the audit and bust its cache identifier;
-4. recapture and verify line count, maximum line length, and highlighting.
-
-If readable source cannot be produced, mark affected verdicts and the post-loader check `blocked`.
+Use post-loader reference sites for every source decision in this route. Analysis 09 owns the complete source-quality inventory and repair procedure. A missing or unreadable required source keeps the affected export verdict unresolved and blocks this route's supported conclusion.
 
 ## Required Artifacts
 
@@ -69,3 +60,12 @@ If readable source cannot be produced, mark affected verdicts and the post-loade
 - per-export/root analysis JSON and Markdown
 - source-confirmed export ledger with coverage
 - whole-module import-cause rows
+
+## Completion Gate
+
+Review every non-`genuinely-used` `exportVerdicts` row and every whole-module
+consumer cause. `still-unknown`, `no-chain`, capped chains,
+missing locations, and missing readable sources keep the affected candidate
+non-terminal or blocked; they cannot coexist with a completed check. Resolve
+every export, not only top roots or sample exports. A positive source rewrite
+needs its own production Rspack A/B and auto-apply/risk decision.

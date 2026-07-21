@@ -1,6 +1,25 @@
 # HTML Bundle Report Design
 
+## Contents
+
+- [Renderer Input Contract](#renderer-input-contract)
+- [Design Goal](#design-goal)
+- [Required Page Structure](#required-page-structure)
+- [Component Rules](#component-rules)
+- [Visual System](#visual-system)
+- [Performance, Search, and Delivery Contract](#performance-search-and-delivery-contract)
+- [Copy Rules](#copy-rules)
+- [Evidence Rules](#evidence-rules)
+- [Visual Density Rules](#visual-density-rules)
+- [Agent Readability Review Gate](#agent-readability-review-gate)
+- [Validation Checklist](#validation-checklist)
+
 Use this reference for the mandatory final artifact of every bundle-optimization run. The goal is a polished report that is specific enough for engineers to audit, but readable enough for a product or infra owner to decide the next step without decoding internal artifacts. JSON and Markdown are backing evidence; neither replaces the HTML.
+
+The HTML is strictly a final deliverable. The agent must verify that every
+check and complete candidate worklist satisfies the skill's completion contract
+before rendering. Never turn a running or sampled worklist into an apparently
+finished report.
 
 ## Renderer Input Contract
 
@@ -21,8 +40,31 @@ Normalize fresh artifacts into one JSON object before rendering. At minimum prov
     "diagnosticRawBytes": 0
   },
   "measurement": {},
-  "checks": [{ "id": "baseline", "state": "completed", "result": "...", "evidence": "..." }],
-  "optimizations": [],
+  "checks": [
+    {
+      "id": "baseline",
+      "state": "blocked",
+      "result": "...",
+      "evidence": "...",
+      "attemptedCommand": "...",
+      "error": "exact stderr/exception",
+      "missingPrerequisite": "...",
+      "nextCommand": "..."
+    }
+  ],
+  "optimizations": [
+    {
+      "id": "optimization-1",
+      "detailItemId": "module-or-detail-id",
+      "group": "optimization",
+      "status": "unquantified",
+      "classification": "...",
+      "risk": "...",
+      "evidence": [],
+      "validation": "..."
+    }
+  ],
+  "ecmaAttribution": null,
   "modules": [],
   "sources": [],
   "analyses": [],
@@ -32,7 +74,90 @@ Normalize fresh artifacts into one JSON object before rendering. At minimum prov
 
 All ten check ids are required: `baseline`, `reachability`, `retained-unused`, `side-effects`, `export-usage`, `rollup-diff`, `cjs2esm`, `splitchunks`, `ecma`, and `post-loader`. A missing or invalid row is rendered as `blocked`, not silently omitted.
 
-Each module may reference `sourceId`; each source supplies `id`, `path`, readable `source` or `sourceFile`, source-quality metadata, and optional unused/highlight ranges. Each optimization includes status/classification, raw and gzip savings, reason, risk, evidence, and validation command. Related pages and actions must be explicit even when missing or empty.
+`completed-no-op` requires a fresh non-empty `evidence`/`artifact`; the renderer converts an unsupported no-op claim to `blocked`. A blocked row keeps `attemptedCommand`, exact `error`, `missingPrerequisite`, and `nextCommand` as four separate visible fields. Do not collapse them into one command/error cell in normalized data.
+
+Each module may reference `sourceId`; each source supplies `id`, `path`, readable `source` or `sourceFile`, source-quality metadata, and optional unused/highlight ranges. Each optimization includes status/classification, raw and gzip savings, reason, risk, evidence, and validation command. Use `detailItemId` to bind it to an existing module/detail row. If no matching item exists, the renderer creates one, so every optimization remains selectable even when `modules` is non-empty. Use `group: "optimization"` for actionable work and `group: "experiment"` for diagnostic/rejected/no-op work; absent groups are inferred. Supported visible statuses include `confirmed`, `candidate`, `unquantified`, `diagnostic`, `rejected`, and `completed-no-op`.
+
+For a material ECMA change, provide `ecmaAttribution` with `baselineModuleCount`, `experimentModuleCount`, inventory-derived `addedModules`/`removedModules`, source-map-derived `retainedShrunkSources`/`retainedGrownSources`, `topGeneratedByteContributors`, `postLoaderSourceDiffConclusion`, `rootCause`, `mappedBytes`, `unmappedBytes`, and non-empty `artifacts`. Materiality is inferred from the absolute `appJsRawDeltaBytes`/`rawDeltaBytes` (legacy `*ReductionBytes` is accepted), the baseline byte count, or an unexpected graph/helper/polyfill flag; a material win or regression with missing structured fields forces the `ecma` check to `blocked`. `retained*Sources` are source-level attribution. Show a corresponding module and confidence only when `joinKind` is `one-to-one`; never infer added/removed modules from source-map absence.
+
+For a readable material ECMA explanation, the renderer also accepts these optional structured fields. They do not replace the required completeness fields above, and an omitted count is rendered as `未提供`, never as zero:
+
+```json
+{
+  "ecmaAttribution": {
+    "conclusion": "plain-language direct answer",
+    "comparisonScope": "baseline target -> experiment target; production or diagnostic",
+    "diagnosticOnly": true,
+    "moduleCategories": [
+      {
+        "id": "api-polyfill | transform-helper | first-party | ordinary-third-party | runtime | other",
+        "label": "visible label",
+        "removedCount": 0,
+        "addedCount": 0,
+        "netModuleDelta": 0,
+        "description": "why this category changed",
+        "evidence": []
+      }
+    ],
+    "removedBreakdown": {
+      "apiPolyfillCount": 0,
+      "transformHelperCount": 0,
+      "firstPartyCount": 0,
+      "ordinaryThirdPartyCount": 0,
+      "runtimeCount": 0,
+      "otherCount": 0
+    },
+    "partitionSummary": [
+      {
+        "id": "stable compilation partition id",
+        "baselineModuleCount": 0,
+        "experimentModuleCount": 0,
+        "removedCount": 0,
+        "addedCount": 0,
+        "retainedCount": 0,
+        "rawDeltaBytes": 0,
+        "gzipDeltaBytes": 0,
+        "conclusion": "coverage/result"
+      }
+    ],
+    "byteAttribution": {
+      "rawDeltaBytes": 0,
+      "gzipDeltaBytes": 0,
+      "mappedBaselineBytes": 0,
+      "mappedExperimentBytes": 0,
+      "mappedDeltaBytes": 0,
+      "unmappedBaselineBytes": 0,
+      "unmappedExperimentBytes": 0,
+      "unmappedDeltaBytes": 0
+    },
+    "postLoaderDiffs": [
+      {
+        "title": "exact module path",
+        "reason": "agent-authored cause of the source difference",
+        "removedHelpers": [],
+        "baselineSnippet": "short complete-enough before snippet",
+        "experimentSnippet": "short complete-enough after snippet",
+        "artifacts": []
+      }
+    ],
+    "failureLedger": [
+      {
+        "analysis": "failed analysis route",
+        "attempt": 1,
+        "status": "recovered | failed | abandoned | running | blocked",
+        "command": "exact attempted command",
+        "error": "exact failure reason",
+        "resolution": "fix and retry performed",
+        "nextAction": "final disposition or exact next command"
+      }
+    ]
+  }
+}
+```
+
+`removedModules` and `addedModules` remain the complete inventory-derived lists, not top-N samples. Each row should carry a canonical module identity plus `category`, `partition`, and an agent-authored `reason` when known. `postLoaderDiffs` should contain concise review snippets; link full captures through `artifacts` instead of placing entire source files in the core index. The visible ECMA section leads with the four direct removed-module answers (API polyfill, transform helper, first-party business code, and ordinary third-party code), then puts partition coverage, complete removal/addition identities, retained shrink/growth, loader before/after code, byte reconciliation, failure/retry history, and backing artifacts in expandable evidence groups. Legacy ECMA input without these optional fields remains renderable.
+
+Related pages and actions must be explicit even when missing or empty.
 
 Render with:
 
@@ -42,7 +167,7 @@ node scripts/render-bundle-report.cjs \
   --out-dir <run>/report
 ```
 
-Use `--force-server` to test server mode on a small fixture. The renderer creates the HTML, core index, detail/source shards, performance/privacy manifest, CSS, and client script.
+Use `--force-server` to test server mode on a small fixture. The renderer creates the HTML, core index, detail/source shards, performance/privacy manifest, CSS, and client script. Rendering sets `report-manifest.json.auditStatus` from the ten checks but leaves `overallStatus: "incomplete"` and `deliveryStatus: "pending-readability-review"` until the final artifact is reviewed and finalized.
 
 ## Design Goal
 
@@ -85,11 +210,13 @@ Use this structure for the top-level HTML:
    - State raw is the primary metric and gzip is secondary.
    - State exactly which build mode counts as production-comparable.
 
-5. **All optimizations overview**
+5. **Optimization and experiment overviews**
    - Use a table or dense list that fits most rows in one screen.
    - Columns: item, status, class, raw delta, gzip delta, why it changed, next validation.
    - Sort by raw delta first, then risk/status.
    - Never hide unquantified committed work; show it as `待量化`, not as zero.
+   - Keep actionable optimizations separate from diagnostics, rejected proposals, and completed no-op experiments.
+   - Every row must link to a selectable detail item that retains classification, risk, evidence, and validation.
 
 6. **Mandatory coverage matrix**
    - Show every skill check: production baseline plus resolved optimization config, reachability, retained unused, side effects, export usage roots, Rollup diff, CJS-to-ESM, splitChunks, ECMA level, and post-loader source quality.
@@ -120,14 +247,17 @@ Use this structure for the top-level HTML:
    - Keep diagnostic-only experiments separate from committed or production-ready changes.
    - Use raw-first numbers.
    - Explain why the result is not counted.
+   - For a material ECMA result, show a compact root-cause table before raw lists: baseline/experiment module counts, inventory-derived added/removed counts, retained source-map sources that shrank/grew, top generated-byte contributors, one-to-one module joins only when proven, loader-output change or no-change, mapped/unmapped residual, and the agent's plain-language conclusion. Link the complete module and post-loader source diffs.
 
 10. **Action queue**
-   - Rank by expected raw-size impact and confidence.
-   - Each row must have an exact validation command or report to rerun.
+
+- Rank by expected raw-size impact and confidence.
+- Each row must have an exact validation command or report to rerun.
 
 11. **Appendix**
-   - Put full raw tables, failed experiments, data-quality limits, and artifact paths here.
-   - Avoid forcing readers through appendix content to understand the decision.
+
+- Put full raw tables, failed experiments, data-quality limits, and artifact paths here.
+- Avoid forcing readers through appendix content to understand the decision.
 
 ## Component Rules
 
@@ -256,12 +386,72 @@ Aim for dense but readable.
 - Use tables for repeated facts; use paragraphs only for reasoning.
 - Use subdued borders and background bands to separate sections. Do not rely on color alone for status.
 
+## Agent Readability Review Gate
+
+Generating and technically validating the HTML is not enough. Before delivery, the agent must open the rendered report itself and review it as the intended reader, without using raw JSON to fill gaps in the page.
+
+On the first review pass, answer from the visible report alone:
+
+1. What exact raw and gzip result is counted?
+2. Which changes are landed, candidates, diagnostics, rejected, or blocked?
+3. Why did the three largest results change?
+4. If ECMA produced a material result, did modules disappear, did retained modules shrink or grow, and what changed in loader output?
+5. What evidence or source can the reader open next?
+6. What exact validation or ownership action remains?
+
+Review both a normal laptop viewport and a narrow viewport. Inspect the first screen, optimization overview, at least one high-impact detail, one no-op/rejected item, one source drill-down, the ECMA explanation when material, the failure/limitation path, and the action queue. Check terminology, paragraph length, table width, clipping, numeric alignment, status clarity, and whether source/module review bytes could be mistaken for savings.
+
+Write `<run-dir>/report/readability-review.md`. Its machine-readable metadata lines must bind the review to the exact final artifact:
+
+```text
+runId: <manifest runId>
+generatedAt: <manifest generatedAt>
+htmlSha256: <manifest readabilityReview.htmlSha256>
+coreSha256: <manifest readabilityReview.coreSha256>
+cssSha256: <manifest readabilityReview.cssSha256>
+clientSha256: <manifest readabilityReview.clientSha256>
+dataSha256: <manifest readabilityReview.dataSha256>
+browser: <browser and version>
+reportUrl: <absolute file/http/https URL to bundle-optimization-report.html>
+desktopViewport: 1440x900
+narrowViewport: 390x844
+desktopScreenshot: <existing absolute path or path inside report dir>
+narrowScreenshot: <existing absolute path or path inside report dir>
+consoleErrors: 0
+highImpactItemId: <opened detail item id>
+noOpOrRejectedItemId: <opened completed-no-op/rejected detail item id>
+sourceQuery: <query visibly exercised>
+sourceMatchLocation: <source id>:<line>[:<column>]
+reviewedAt: <ISO timestamp at or after generatedAt>
+```
+
+Then record:
+
+- answers to the six reader questions above;
+- every readability issue found, severity, and the exact copy/layout/data fix;
+- unresolved readability limitations;
+- the final non-empty line exactly `verdict: pass` or `verdict: fail`.
+
+For a legitimately empty report, `highImpactItemId`, `noOpOrRejectedItemId`, and the source query/location pair may use `not-applicable:<reason>` only when the renderer can prove the corresponding detail, no-op/rejected, or source-shard set is empty. If the set is non-empty, review a real item/query.
+
+If any answer requires opening backing JSON, if a diagnostic number looks counted, if a source-size priority looks like a saving, if a material ECMA result lacks module/source causality, or if narrow layout hides evidence, fix the report data/copy/layout, rerender it, and repeat the review. Do not deliver a `fail` verdict. A no-issue first pass is allowed, but it must still record concrete evidence for `pass`; “looks good” is not sufficient.
+
+After the final review, finalize it mechanically:
+
+```bash
+node scripts/render-bundle-report.cjs \
+  --finalize-readability \
+  --out-dir <run>/report
+```
+
+Finalization verifies the run/timestamp, HTML/core/CSS/client/data hashes, viewport bounds, distinct screenshots, zero console errors, exercised detail/source records, and final verdict. It updates only the manifest, avoiding a hash cycle. Any rerender or change to HTML, CSS, client code, or detail/source shards invalidates the previous review. Delivery is ready only when `report-manifest.json` has `readabilityReview.status: "passed"`, `deliveryStatus: "ready"`, and `overallStatus: "complete"`; if a mandatory check is blocked, a passing readability review produces `deliveryStatus: "incomplete-checks"` and overall remains incomplete.
+
 ## Validation Checklist
 
 Before delivering an HTML report:
 
 1. Open or parse the HTML and confirm it is valid enough to load.
-2. Confirm no text overlaps at desktop and mobile widths if a browser check is available.
+2. Confirm no text overlaps at desktop and mobile widths in the actual browser review.
 3. Confirm the first screen states raw-size result first.
 4. Confirm every visible gzip value has a raw value before it or next to it.
 5. Confirm every committed item is either quantified or marked `待量化`.
@@ -274,3 +464,5 @@ Before delivering an HTML report:
 12. Test a source query end to end: select its module, wait for the shard, jump to the result, and confirm the exact columns are red-highlighted; then switch selection during a slow load and confirm stale data never appears.
 13. Verify list and source DOM node counts stay near the visible window on a large fixture, regex timeout/cancellation works, and the configured core/shard/cache budgets are shown in the report.
 14. In server mode, confirm traversal attempts are rejected and every served shard has the report's `runId`. In publish mode, confirm a separate redacted copy passed the same checks.
+15. For every material ECMA result, confirm the HTML exposes module counts, inventory-derived added/removed identities, retained shrunk/grown source contributors, one-to-one module joins only when proven, post-loader source-diff conclusions, and mapped/unmapped residuals; asset totals alone fail validation.
+16. Run readability finalization and confirm the manifest records matching HTML/core/CSS/client/data hashes, `readabilityReview.status: "passed"`, `deliveryStatus: "ready"`, and `overallStatus: "complete"` (or the explicitly expected `incomplete-checks` state for a blocked audit).

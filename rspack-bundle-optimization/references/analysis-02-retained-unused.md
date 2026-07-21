@@ -60,3 +60,11 @@ Do not call the sum of source/module sizes removable bytes. Report it as worklis
 - a handoff worklist for Analysis 03
 
 The check is `completed-no-op` only when a successful concat-off capture finds zero emitted `usedExports=[]` modules.
+
+## Completion Gate
+
+Review every `retainedUnusedEntries` row. Rows labeled
+`investigate` are unresolved work, not a completed disposition; inspect their
+graph/concatenation cause even when they lack a side-effect bailout. The check
+cannot complete until every retained module is accounted for and every handoff
+to Analysis 03 or Analysis 04 is explicitly tracked with the fresh source hash.

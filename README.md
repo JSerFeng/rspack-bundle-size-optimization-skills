@@ -1,10 +1,10 @@
 # Rspack Bundle Size Optimization Skill
 
-A skill for comprehensive, evidence-driven bundle-size audits in Rspack-family builds (`Rspack`, `Rsbuild`, and `Rspeedy`). It measures real emitted JavaScript, checks every supported optimization route, and delivers a browser-validated interactive HTML report.
+A skill for autonomous, evidence-driven bundle optimization in Rspack-family builds (`Rspack`, `Rsbuild`, and `Rspeedy`). It exhausts every supported route and candidate, applies only production-measured changes with no observed residual risk, and repeats from a fresh baseline until it reaches a fixed point.
 
 ## What it does
 
-Starting an execution audit runs all ten checks; the skill does not ask the user to choose a mode.
+Starting an optimization runs all ten checks without asking the user to choose a mode. Explicitly read-only requests execute the same analysis without project edits.
 
 | Check | Question it answers |
 | --- | --- |
@@ -20,6 +20,8 @@ Starting an execution audit runs all ten checks; the skill does not ask the user
 | Post-loader quality | Is the captured source readable and complete enough to support the conclusions? |
 
 Each check ends as `completed`, `completed-no-op`, or `blocked`. Missing tools and incompatible APIs are reported as blocked with an exact unblock action; they are never disguised as “no candidates.”
+
+Data capture is not completion. Every candidate must receive a source-backed terminal disposition. Safe measured candidates are applied and validated automatically; risk-bearing candidates remain unapplied with a concrete failure mode and clearing condition.
 
 ## Safety and measurement rules
 
@@ -69,12 +71,12 @@ npx skills add JSerFeng/rspack-bundle-size-optimization-skills --skill rspack-bu
 
 ### Install manually
 
-Copy or symlink the skill folder into the skills directory used by your coding environment:
+Copy or symlink the skill folder into the skills directory used by your coding environment. Prefer a symlink while authoring so the repository remains the single source of truth:
 
 ```bash
 git clone https://github.com/JSerFeng/rspack-bundle-size-optimization-skills.git
-SKILLS_DIR=/path/to/your/skills
-cp -R rspack-bundle-size-optimization-skills/rspack-bundle-optimization "$SKILLS_DIR/"
+skill_install_dir=/path/to/your/skills
+ln -s "$(pwd)/rspack-bundle-size-optimization-skills/rspack-bundle-optimization" "$skill_install_dir/rspack-bundle-optimization"
 ```
 
 The exact directory and discovery mechanism depend on the environment.
@@ -94,7 +96,9 @@ The skill inspects the project, creates an isolated run, executes every supporte
 ```text
 rspack-bundle-optimization/
 ├── SKILL.md
+├── agents/openai.yaml
 ├── references/
+│   ├── analysis-00-baseline-config.md
 │   ├── analysis-01-reachability.md
 │   ├── analysis-02-retained-unused.md
 │   ├── analysis-03-side-effects.md
@@ -103,6 +107,7 @@ rspack-bundle-optimization/
 │   ├── analysis-06-cjs-to-esm.md
 │   ├── analysis-07-splitchunks.md
 │   ├── analysis-08-ecma.md
+│   ├── analysis-09-post-loader.md
 │   ├── html-report-design.md
 │   └── optimization-summary-template.md
 └── scripts/
@@ -112,6 +117,8 @@ rspack-bundle-optimization/
     ├── rollup-graph-capture-plugin.cjs
     ├── run-rollup-export-diff.cjs
     ├── transpiled-cjs-to-esm-loader.cjs
+    ├── ecma-module-capture-plugin.template.cjs
+    ├── ecma-module-diff.cjs
     ├── sourcemap-generated-byte-attribution.cjs
     ├── render-bundle-report.cjs
     ├── serve-bundle-report.cjs

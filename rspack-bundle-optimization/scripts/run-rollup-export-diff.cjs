@@ -249,7 +249,10 @@ async function runComparison({ graphPath, outDir, projectRoot }) {
     const result = {
       version: 1,
       generatedAt: new Date().toISOString(),
-      status: 'completed',
+      // A successful comparator run is only data capture. Any gap still needs
+      // source confirmation and a production Rspack A/B before this route can
+      // receive a terminal agent decision.
+      status: comparison.gaps.length === 0 ? 'completed-no-op' : 'review-required',
       graphPath,
       projectRoot,
       diagnostics,

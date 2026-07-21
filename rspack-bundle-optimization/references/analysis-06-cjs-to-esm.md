@@ -62,3 +62,21 @@ Report every touched npm package and every changed package:
 Many transformed modules with no emitted reduction is not an optimization. Confirm that transformed source reached Rspack and inspect remaining side effects, namespace use, barrels, and concatenation.
 
 An eligibility scan with zero safely transformable modules is `completed-no-op`. Missing SWC or a loader failure is `blocked`.
+
+## Required Artifacts
+
+- exact loader rule and scoped package/module include set;
+- transformed, skipped, and ambiguous module inventory with reasons;
+- touched-package and changed-package summaries;
+- stats module-size delta labeled as attribution scope;
+- production appJs/emitted-JS raw and gzip A/B totals;
+- source-backed rewrite candidates and their terminal dispositions.
+
+## Completion Gate
+
+Account for every touched package, transformed module, and skip reason in the
+worklist. The analysis loader itself is never promoted to production.
+If the experiment exposes a real opportunity, analyze a separate source or
+package-level change; only that change may pass the ordinary auto-apply gate.
+Ambiguous transforms and unvalidated dependency patches are `risk-found`, not
+silent skips.

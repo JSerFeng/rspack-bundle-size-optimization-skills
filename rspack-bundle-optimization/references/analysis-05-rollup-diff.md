@@ -9,11 +9,15 @@ Use Rollup as a diagnostic comparator for the same loader-processed graph. A Rol
 Add `scripts/rollup-graph-capture-plugin.cjs` to the isolated diagnostic build:
 
 ```js
-const { RollupGraphCapturePlugin } = require('<skill>/scripts/rollup-graph-capture-plugin.cjs');
+const {
+  RollupGraphCapturePlugin,
+} = require("<skill>/scripts/rollup-graph-capture-plugin.cjs");
 
-plugins.push(new RollupGraphCapturePlugin({
-  graphPath: '<run>/rollup-diff/rollup-graph.json',
-}));
+plugins.push(
+  new RollupGraphCapturePlugin({
+    graphPath: "<run>/rollup-diff/rollup-graph.json",
+  }),
+);
 ```
 
 Use `optimization.concatenateModules:false`, named module ids, and readable non-minimized post-loader source. The capture records module ids, source, entry status, Rspack provided/used exports, and request-to-target edges.
@@ -73,3 +77,11 @@ Only a source-backed rewrite followed by an isolated production Rspack A/B can b
 - `rollup-export-diff.json` and `.md`
 - warning/unresolved-edge ledger
 - source-confirmed candidate ledger
+
+## Completion Gate
+
+`run-rollup-export-diff.cjs` returns `review-required` whenever it finds gaps.
+Review all `gaps[]` rows and read the corresponding Rspack
+consumer/post-loader source for each one. The comparator command succeeding is
+not completion. Every gap must be rejected, kept, risk-documented, blocked, or
+validated by a source rewrite plus production Rspack A/B.

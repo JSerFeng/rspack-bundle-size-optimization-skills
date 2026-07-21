@@ -1,196 +1,133 @@
 ---
 name: rspack-bundle-optimization
-description: Run a comprehensive Rspack, Rsbuild, or Rspeedy bundle audit and deliver a polished interactive HTML report. Use when the user asks to execute a bundle-size investigation, optimization audit, or measured report. Once an execution audit starts, check every analysis route without asking the user to choose modes. For read-only review or explanation of existing artifacts, inspect them without starting builds or mutating the project.
+description: Autonomously audit and optimize Rspack, Rsbuild, or Rspeedy bundles. Use for bundle-size investigations, reductions, optimizations, or measured reports. Exhaust all ten analysis routes and every discovered candidate; data capture alone is never completion. For optimization requests, apply only source-backed, production-measured changes with no observed residual risk, validate them, refresh stale evidence, and repeat to a fixed point. For explicitly read-only requests, perform the same exhaustive analysis without project edits.
 ---
 
 # Rspack Bundle Optimization
 
-Run one evidence-first audit across every supported optimization route. Do not show a mode picker and do not stop after quick triage.
+Own the bundle audit from baseline through validated fixed point. Treat the HTML report as the final deliverable, never as a substitute for analysis.
 
-## Metric Contract
+## Operating Contract
 
-- Rank and headline by emitted JavaScript `raw` bytes.
-- Show `gzip` second as a transfer-size proxy.
-- Define `appJs` with an explicit asset inclusion rule and persist the included asset list.
-- Keep production savings separate from source/module-size sums, diagnostic upper bounds, estimated attribution, and debug-artifact changes.
-- Count a saving only when baseline and experiment use the same entries, dependencies, feature flags, splitChunks rules, minimization, and `concatenateModules`, except for the single variable under test.
+- Infer `optimize` unless the user explicitly asks for a read-only audit, review, or report.
+- In `optimize` mode, inspect source, run experiments, make safe edits, and validate them without handing candidate decisions back to the user.
+- Keep the ten routes and their complete candidate worklists in the host agent's native task plan. Do not create a daemon, controller, queue, or state machine to schedule agent work.
+- Treat analyzer output as evidence. A successful capture command creates work; it does not complete a route that has findings.
+- Continue while runnable or unresolved work remains. Elapsed time, context compaction, a partial report, or one successful optimization is not a stopping condition.
+- Do not commit, push, publish, or change product policy unless the user separately requests it.
 
-## Create an Isolated Project Run
+## Fixed-Point Workflow
 
-Inspect the project before building. Choose a project-local ignored or temporary root, then create a unique run directory such as:
+1. Read applicable `AGENTS.md` files and inspect the project, production command, package manager, compiler version, dirty state, and available validation commands.
+2. Create a fresh isolated run with `scripts/create-audit-run.cjs`. Record commands, fingerprints, outputs, and artifacts in its manifest.
+3. Capture the production baseline and resolved optimization configuration.
+4. Execute all ten routes below. Read each route's reference completely before running it and resolve its complete candidate worklist.
+5. For each candidate, inspect graph evidence, source, package/config context, generated output, and the route-specific risk boundary.
+6. In `optimize` mode, run a narrow production-comparable experiment. Promote the change only if it passes the auto-apply gate.
+7. If any change is applied, discard stale comparisons and restart the full workflow from a fresh production baseline.
+8. When a complete pass applies no new change and every candidate is terminal, render and browser-validate the final report.
 
-```text
-<project-temp>/rspack-audit/<run-id>/
-  manifest.json
-  baseline/
-  optimization-config/
-  reachability/
-  retained-unused/
-  side-effects/
-  export-usage/
-  rollup-diff/
-  cjs2esm/
-  splitchunks/
-  ecma/
-  post-loader/
-  report/
-```
+If a route is blocked, record the blocker and continue every independent route.
 
-Use `scripts/create-audit-run.cjs` when practical. The agent may choose a different project-appropriate ignored root, but must preserve the same isolation and manifest rules.
+## Measurement Contract
 
-Record in `manifest.json`:
+- Rank and headline emitted JavaScript `raw` bytes; show `gzip` second.
+- Define `appJs` with an explicit asset inclusion rule and preserve the included asset manifest.
+- Count savings only from production-comparable A/B builds with the same entries, dependencies, feature flags, splitChunks rules, minimization, and concatenation, except for the one variable under test.
+- Keep source/module-size scope, diagnostic upper bounds, estimated attribution, debug output, and browser-target experiments separate from confirmed production savings.
+- Never reuse production `dist`, overwrite another experiment, or combine artifacts from different run ids.
 
-- project root, run id, timestamp, build command, output metric rule;
-- Git commit and dirty state when available;
-- Node, package manager, Rspack/Rsbuild/Rspeedy and minifier versions;
-- lockfile, build-config, and relevant environment fingerprints without secret values;
-- every command, exit code, output directory, and artifact path.
+## Mandatory Routes
 
-Never reuse the production `dist`, overwrite another experiment, or mix stats/source/export-usage data from different run ids. Run builds sequentially when they share caches or framework temp state. A report must reject stale or mismatched artifacts.
-
-## Mandatory Ten Checks
-
-Execute all ten checks in this order. The HTML report is a deliverable after these checks, not an eleventh check.
-
-1. **Production baseline, resolved optimization config, and quick triage** — emitted assets, raw/gzip totals, asset manifest, largest assets/modules, plus the effective size-related Rspack options captured from the real production compilation.
-2. **Chunk-group reachability** — detect modules loaded by a group but unreachable from its roots; emit the chunk graph.
-3. **Retained unused modules** — run with `concatenateModules:false`, enumerate every emitted `usedExports=[]` module and its bailout.
-4. **Side-effects source/package audit and A/B** — inspect every candidate's source and package metadata; experiment only with agent-confirmed safe modules.
-5. **Export Usage Roots** — trace every captured used export, whole-module cause, terminal root, and post-loader reference site.
-6. **Rollup-vs-Rspack export diff** — materialize the same post-loader graph, run Rollup, and source-confirm actionable gaps.
-7. **CJS-to-ESM experiment** — run the conservative loader and report package-level size deltas and skips.
-8. **splitChunks A/B** — test one knob at a time, beginning with fixed cache-group names only when reachability provides a target.
-9. **ECMA target experiment** — raise transform and minifier targets together, attribute generated-byte changes, and derive no-target-change rewrites.
-10. **Post-loader source quality** — verify source readability, loader compactness, source locations, and evidence completeness.
-
-Read the matching reference completely before executing each check:
-
-| Check | Required reference |
-| --- | --- |
-| 1 | This file's metric, run, and resolved optimization config contracts |
-| 2 | `references/analysis-01-reachability.md` |
-| 3 | `references/analysis-02-retained-unused.md` |
-| 4 | `references/analysis-03-side-effects.md` |
-| 5 | `references/analysis-04-export-usage.md` |
-| 6 | `references/analysis-05-rollup-diff.md` |
-| 7 | `references/analysis-06-cjs-to-esm.md` |
-| 8 | `references/analysis-07-splitchunks.md` |
-| 9 | `references/analysis-08-ecma.md` |
-| 10 | `references/analysis-04-export-usage.md` and `references/html-report-design.md` |
-
-## Coverage States
-
-Give every check exactly one machine state and a localized display label:
-
-| Machine state | Chinese label | Meaning |
+| # | Route | Required reference |
 | --- | --- | --- |
-| `completed` | 已完成 | Fresh artifacts and a supported conclusion exist. |
-| `completed-no-op` | 已检查，无可执行候选 | The check ran far enough to prove no experiment is useful. |
-| `blocked` | 受阻 | A concrete missing capability or failed command prevents completion. |
+| 1 | Production baseline, resolved optimization config, and quick triage | `references/analysis-00-baseline-config.md` |
+| 2 | Chunk-group reachability and chunk graph | `references/analysis-01-reachability.md` |
+| 3 | Retained unused modules with concatenation disabled | `references/analysis-02-retained-unused.md` |
+| 4 | Side-effects source/package audit and production A/B | `references/analysis-03-side-effects.md` |
+| 5 | Export Usage Roots and whole-module import causes | `references/analysis-04-export-usage.md` |
+| 6 | Rollup-vs-Rspack export diff | `references/analysis-05-rollup-diff.md` |
+| 7 | Conservative CJS-to-ESM experiment | `references/analysis-06-cjs-to-esm.md` |
+| 8 | splitChunks single-variable A/B | `references/analysis-07-splitchunks.md` |
+| 9 | ECMA producer/minifier cost and root-cause attribution | `references/analysis-08-ecma.md` |
+| 10 | Post-loader source quality and evidence completeness | `references/analysis-09-post-loader.md` |
 
-For `blocked`, record the attempted command, exact error, missing prerequisite, and next command. A report may still be delivered with blocked rows, but the overall audit status is `incomplete`, not successful.
+Execute the routes in this priority order unless a blocked dependency requires continuing an independent route first. Do not use a presentation table or top-N sample as a worklist.
 
-Use these minimum no-op proofs:
+## Candidate Contract
 
-- Reachability: a successful graph traversal found zero removable JS-like members.
-- Retained unused: a successful concat-off capture found zero emitted `usedExports=[]` modules.
-- Side effects: the agent reviewed every candidate source and package, and confirmed zero modules safe for an experiment.
-- Rollup diff: Rollup ran against the captured graph and found zero export gaps.
-- CJS-to-ESM: an eligibility scan found zero safely transformable static transpiled-CJS modules.
-- splitChunks: config plus reachability proves no fixed-name/shared-fan-in target exists.
-- ECMA: both stages already use the comparison target or a successful comparison produces no relevant change.
-- Post-loader: no source-backed candidate exists, or all captured sources pass the quality thresholds.
+Record the discovered count for every route. Give every candidate exactly one terminal disposition:
 
-Missing tools or incompatible compiler APIs are `blocked`, never `completed-no-op`.
+- `applied`: promoted in `optimize` mode and fully validated;
+- `validated-opportunity`: safe and measured, but retained unapplied only in `audit-only` mode;
+- `keep`: source or runtime evidence proves the retained behavior is required;
+- `risk-found`: a plausible optimization has a concrete residual risk;
+- `rejected`: the production experiment has no positive raw-byte result or its hypothesis is disproved;
+- `blocked`: required evidence cannot be obtained after a concrete attempt.
 
-## Resolved Optimization Configuration Gate
+Analyzer labels such as `investigate`, `unknown`, `no-chain`, `source-review-required`, or `review-required` are non-terminal. A route cannot complete until its terminal count equals its discovered count.
 
-Do not infer effective optimization values from the author-written config or by serializing all of `compiler.options`. During check 1, use `scripts/optimization-config-check-plugin.template.cjs` behind `RSPACK_OPT_CONFIG=1` and run the otherwise unchanged production build.
+For every `risk-found` candidate, record:
 
-- Direct Rspack: append the plugin to `plugins`.
-- Rsbuild: append it from `tools.rspack` with `appendPlugins`.
-- Other frameworks: inject it through their final Rspack-config mutation API.
+- the concrete failure mode;
+- the source, graph, output, or policy evidence exposing it;
+- the exact validation or product decision that could clear it.
 
-Require one fresh `optimization-config*.json` artifact for every top-level production compiler. The capture must come from `compilation.options`, include the installed Rspack version, and cover:
+Do not use a generic label such as “possibly risky.”
 
-- pruning: `nodeEnv`, `providedExports`, `usedExports`, `sideEffects`, `innerGraph`, `concatenateModules`, and supported `inlineExports`;
-- minification and naming: `minimize`, every JavaScript/CSS minimizer, and `mangleExports`;
-- chunk cleanup and layout: `mergeDuplicateChunks`, `removeEmptyChunks`, `splitChunks`, `runtimeChunk`, `chunkIds`, and `moduleIds`;
-- ESM library output: supported `avoidEntryIife` and the constraints under which it applies.
+## Auto-Apply Gate
 
-For each option, compare the resolved artifact with the author config, framework mutations, and version-matched default. Record provenance as `explicit`, `framework`, `default`, or `unknown`; never guess. Write `optimization-config-check.md` with resolved value, default, provenance, status (`ok`, `suspect`, `experiment`, or `n/a`), likely size impact, evidence, and next action.
+Promote an optimization only when all conditions hold:
 
-Run each suspect or experiment independently and env-gated against the original production baseline. If an unexpectedly disabled core pruning/minification option is corrected, recapture the resolved config and baseline before continuing. Keep `concatenateModules:false` only in diagnostics that require it. A missing or wrong-target capture makes check 1 `blocked`.
+- the change is concrete, narrow, source-backed, and contains no unrelated edits;
+- a production-comparable A/B proves a positive emitted-JavaScript raw-byte reduction;
+- the output diff is fully explained by the intended transformation;
+- review finds no observed residual semantic, public-API, browser-support, dependency, side-effect-order, registration, loading-order, chunk/request, cache, CSS, worker, or product-policy risk;
+- the production build and the most relevant tests or runtime smoke checks pass.
 
-## Side-Effects Safety Gate
+If any condition is unproven, do not promote the change. Classify it as `risk-found`, `rejected`, or `blocked` with evidence. Never claim absolute zero risk; claim only that no residual risk was observed within the stated checks.
 
-Never infer purity from `node_modules`, ESM syntax, `usedExports=[]`, a package missing `sideEffects`, or a bailout string.
+## Route States
 
-For every side-effect candidate, the agent must inspect:
+Use `pending`, `running`, and `review-required` only while work remains. Give each route one terminal report state:
 
-- complete readable post-loader source and the corresponding source file;
-- the exact top-level bailout statement and all top-level calls, assignments, getters, registrations, imports, and global mutations;
-- nearest package `package.json`, including `sideEffects`, `exports`, `module`, `main`, `type`, browser conditions, and package version;
-- package entry/barrel relationships and whether importing this module intentionally registers runtime behavior, styles, metadata, polyfills, workers, or plugins.
+| State | Meaning |
+| --- | --- |
+| `completed` | Fresh artifacts, complete candidate coverage, and a supported conclusion exist. |
+| `completed-no-op` | The route-specific no-op proof succeeded and discovered no actionable experiment. |
+| `blocked` | A concrete failed command or missing capability prevents a supported conclusion. |
 
-Write `side-effects-decisions.json`. Each row must be `safe-experiment`, `keep`, or `unknown`, with source evidence, package evidence, review timestamp, and matching disk-source, post-loader-source, and package hashes from the fresh worklist. Only a hash-valid `safe-experiment` row may enter the env-gated `sideEffects:false` rule. Source/module-size sums are review scope only; the production A/B emitted raw delta is the only saving.
+For `blocked`, record the attempted command, exact error, missing prerequisite, and next command. Missing tooling or incompatible compiler APIs are blockers, never no-op proofs.
 
-Do not delegate this decision to a filename regex. Subagents may help only when higher-priority instructions and the user explicitly permit them; otherwise process the checkpointed worklist locally.
+## Script Boundary
 
-## Capability Preflight
+- Use bundled scripts for deterministic capture, transformation, byte accounting, comparison, and rendering.
+- Require machine-readable backing data to remain exhaustive; presentation views may rank or truncate it.
+- Do not let scripts infer semantic safety, side-effect purity, compatibility, or the final candidate disposition.
+- Resolve optional analysis packages from the project. Do not modify the project's dependency manifest solely for audit tooling without user authorization.
 
-Before the first expensive build, resolve the required project-local capabilities:
+## Report Delivery
 
-- Rspack/Rsbuild/Rspeedy compiler and production command;
-- installed Rspack version and the version-matched optimization defaults used for comparison;
-- Rollup and optional `@rollup/plugin-commonjs`;
-- `@swc/core` for the conservative CJS loader;
-- `@jridgewell/trace-mapping` or compatible sourcemap reader;
-- a browser/runtime for HTML validation.
+After the fixed point:
 
-Do not change the project's dependency manifest merely to run the audit unless the user authorizes it. The bundled tools resolve dependencies from the project root and emit actionable failures when unavailable.
-
-## Required Tools
-
-Use or adapt these bundled scripts instead of rewriting them each run:
-
-- `scripts/create-audit-run.cjs` — isolated run directory and manifest.
-- `scripts/optimization-config-check-plugin.template.cjs` — capture normalized effective size-related options from the real compilation.
-- `scripts/chunk-group-reachability-plugin.template.cjs` — reachability and chunk graph capture.
-- `scripts/retained-unused-side-effects-plugin.template.cjs` — retained-unused capture.
-- `scripts/retained-unused-disposition.template.cjs` — conservative worklist plus agent-decision merge; never auto-approves purity.
-- `scripts/side-effects-review-worklist.cjs` — collect full source and nearest package metadata for agent review.
-- `scripts/export-usage-capture-plugin.template.cjs`, `scripts/build-all-export-usage.template.cjs`, `scripts/export-usage-root-analysis.template.cjs`, `scripts/show-post-loader.template.cjs` — export-usage pipeline.
-- `scripts/rollup-graph-capture-plugin.cjs` and `scripts/run-rollup-export-diff.cjs` — capture and execute the Rollup comparison.
-- `scripts/transpiled-cjs-to-esm-loader.cjs` and `scripts/cjs2esm-package-size-diff.cjs` — conservative CJS experiment and attribution.
-- `scripts/sourcemap-generated-byte-attribution.cjs` — baseline/experiment generated-byte attribution.
-- `scripts/render-bundle-report.cjs` — normalized data to interactive HTML.
-- `scripts/serve-bundle-report.cjs` — safe project-run-local server for on-demand data.
-
-## HTML Deliverable
-
-After all checks reach a coverage state, read `references/html-report-design.md` completely and generate `<run-dir>/report/bundle-optimization-report.html` from fresh artifacts.
-
-The report must:
-
-- include all ten checks and their states;
-- include the resolved optimization-config table, provenance, suspects, and measured follow-up experiments;
-- lead with confirmed emitted raw savings, then gzip;
-- separate production-comparable savings, high-risk results, optimization potential, and blocked work;
-- support search, sorting, selection, code/source drill-down, exact highlighting, and links to backing artifacts;
-- use lazy/on-demand data and a local server for large reports according to the HTML performance contract;
-- remain local-only by default because it can contain proprietary source and absolute paths; require explicit redaction before publishing.
-
-Validate desktop and narrow layouts, keyboard focus, search/sort, selection, lazy loads, source highlighting, console errors, and stale-artifact rejection. Give the user a clickable report path and, for server mode, the local URL and server command.
+1. Read `references/html-report-design.md` and `references/optimization-summary-template.md` completely.
+2. Render the report from the final fresh pass with `scripts/render-bundle-report.cjs`.
+3. Validate desktop and narrow layouts, interaction, source drill-down, console output, evidence links, and stale-artifact handling.
+4. Perform the agent readability review defined by the report reference and run `--finalize-readability`.
+5. Give the user the local report path or server URL. Keep proprietary source and absolute paths local unless the user requests a redacted publication.
 
 ## Completion Contract
 
-The audit is complete only when:
+Return final only when:
 
-- the production baseline and resolved optimization-config capture succeeded;
-- every mandatory check is `completed` or evidence-backed `completed-no-op`;
-- no headline saving comes from source size, estimated attribution, or a diagnostic build;
-- every side-effects experiment candidate has an agent-authored source/package decision;
-- the browser-validated HTML report and backing manifest are present.
+- the production baseline and resolved configuration capture succeeded;
+- every route is `completed`, evidence-backed `completed-no-op`, or a genuine `blocked`;
+- every discovered candidate has a fresh, source-backed terminal disposition;
+- every safe positive candidate was applied and validated in `optimize` mode;
+- every unapplied opportunity has concrete residual-risk evidence and a clearing condition;
+- the final complete pass applied no new change;
+- no diagnostic or estimated byte count is reported as confirmed savings;
+- every independent route was exhausted despite any blocker;
+- the final report passed browser and readability validation.
 
-If any mandatory check is `blocked`, deliver the report but label the overall audit `incomplete` and name the exact unblock action.
+A run with any blocked route is deliverable only as `incomplete`, with the exact unblock action. Never return final while runnable or unresolved work remains.

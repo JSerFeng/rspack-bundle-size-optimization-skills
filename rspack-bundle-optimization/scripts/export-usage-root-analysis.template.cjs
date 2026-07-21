@@ -596,7 +596,9 @@ function main() {
       .map((cause) => ({ ...cause, rootRole: 'consumer' }));
     const rootAsProviderCauses = (moduleLevelImportsByTarget.get(stripQuery(row.root)) || [])
       .map((cause) => ({ ...cause, rootRole: 'provider' }));
-    const moduleLevelImportCauses = rootAsConsumerCauses.concat(rootAsProviderCauses).slice(0, 20);
+    // Backing data stays exhaustive. The Markdown/HTML views may choose a
+    // ranked subset, but automation must be able to resolve every cause.
+    const moduleLevelImportCauses = rootAsConsumerCauses.concat(rootAsProviderCauses);
     const classification = classifyRoot(
       row.root,
       row.terminalKinds,
@@ -680,20 +682,33 @@ function main() {
   };
   const exportVerdictDistribution = {};
   const overRetainedExports = [];
+  const exportVerdicts = [];
   for (const item of usageRecords) {
     const resource = normalizeResource(item);
     const exportName = normalizeExportName(item);
     const chains = normalizeChains(item);
     let best = null;
     let coarseOnly = true;
+    const terminalRoots = new Set();
     for (const chain of chains) {
       const root = normalizeChainTerminal(chain);
+      if (root) terminalRoots.add(root);
       const v = rootVerdictByPath.get(root) || 'review';
       if (best === null || EXPORT_VERDICT_PRIORITY[v] > EXPORT_VERDICT_PRIORITY[best]) best = v;
       if (!(Array.isArray(chain.edges) && chain.edges.some((e) => e && e.viaNamespace))) coarseOnly = false;
     }
     const verdict = chains.length === 0 ? 'no-chain' : best || 'review';
     exportVerdictDistribution[verdict] = (exportVerdictDistribution[verdict] || 0) + 1;
+    exportVerdicts.push({
+      resource,
+      module: prettyPath(resource),
+      exportName,
+      verdict,
+      coarseOnly,
+      chainCount: chains.length,
+      terminalRoots: [...terminalRoots],
+      directImportCount: item.usage?.directImportCount || item.directImportCount || 0,
+    });
     if (verdict === 'over-retained-suspect') {
       overRetainedExports.push({ module: prettyPath(resource), exportName, coarseOnly });
     }
@@ -713,7 +728,8 @@ function main() {
   const exportsNeedingSourceReview =
     (exportVerdictDistribution['needs-source-confirmation'] || 0) +
     (exportVerdictDistribution['over-retained-suspect'] || 0) +
-    (exportVerdictDistribution.review || 0);
+    (exportVerdictDistribution.review || 0) +
+    (exportVerdictDistribution['no-chain'] || 0);
   const confirmationWorklist = rootRows
     .filter((r) => r.usageVerdict === 'needs-source-confirmation' || r.usageVerdict === 'over-retained-suspect' || r.usageVerdict === 'review')
     .map((r) => ({
@@ -733,6 +749,15 @@ function main() {
       })),
       sampleExports: r.examples.slice(0, 8).map((e) => `${e.target} :: ${e.exportName}`),
     }));
+  const noChainWorklist = exportVerdicts
+    .filter((row) => row.verdict === 'no-chain')
+    .map((row) => ({
+      module: row.module,
+      resource: row.resource,
+      exportName: row.exportName,
+      directImportCount: row.directImportCount,
+      reason: 'captured used export has no concrete chain; repair or source-confirm the missing edge before completion',
+    }));
 
   // Per-root usage verdict distribution: every root gets a verdict, so this is a
   // complete accounting of how much of the kept-alive surface is genuine runtime
@@ -746,7 +771,6 @@ function main() {
   }
   const overRetainedSuspects = rootRows
     .filter((row) => row.usageVerdict === 'over-retained-suspect')
-    .slice(0, 40)
     .map((row) => ({
       root: row.prettyRoot,
       impactedExportCount: row.impactedExportCount,
@@ -759,7 +783,7 @@ function main() {
       providerModule: targetResource,
       providerModulePretty: prettyPath(targetResource),
       causeCount: causes.length,
-      consumers: causes.slice(0, 20).map((cause) => ({
+      consumers: causes.map((cause) => ({
         consumerModule: cause.originResource,
         consumerModulePretty: cause.originPretty,
         originExport: cause.originExport,
@@ -792,22 +816,27 @@ function main() {
     overRetainedExportCount: overRetainedExports.length,
     exportsNeedingSourceReview,
     confirmationWorklistRootCount: confirmationWorklist.length,
+    noChainWorklistCount: noChainWorklist.length,
+    automationCandidateCount: exportVerdicts.filter((row) => row.verdict !== 'genuinely-used').length,
     wholeModuleImportAuditCount: wholeModuleImportAudits.length,
     verdictDistribution,
     overRetainedSuspectRootCount: rootRows.filter((row) => row.usageVerdict === 'over-retained-suspect').length,
   };
 
   const result = {
+    status: exportsNeedingSourceReview > 0 ? 'review-required' : 'completed-no-op',
     summary,
     exportVerdictDistribution,
+    exportVerdicts,
     overRetainedExportsByModule,
     moduleLevelImports,
     wholeModuleImportAudits,
     confirmationWorklist,
+    noChainWorklist,
     categories: categoryRows,
     roots: rootRows,
     overRetainedSuspects,
-    noChain: noChain.slice(0, 200),
+    noChain,
   };
   mkdirSync(dirname(jsonOutPath), { recursive: true });
   writeFileSync(jsonOutPath, `${JSON.stringify(result, null, 2)}\n`);

@@ -65,3 +65,12 @@ Generate `chunk-graph.json` plus `chunk-graph.html`. Every async edge must retai
 - `chunk-graph.json`
 - `chunk-graph.html`
 - build command and run-manifest update
+
+## Completion Gate
+
+Use the complete `removableJSModules` arrays as the worklist, never a
+display-ranked subset. Every unreachable JS-like member must end as `applied`,
+`validated-opportunity`, `keep`, `risk-found`, `rejected`, or `blocked` after root
+and source inspection. A graph capture with nonzero candidates is
+`review-required`, not completed. If a source change is applied, rerun the
+full audit from a new production baseline pass.

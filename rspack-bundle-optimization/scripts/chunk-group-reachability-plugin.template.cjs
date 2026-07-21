@@ -189,7 +189,9 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
             });
           }
           chunkModuleList.sort((a, b) => b.size - a.size);
-          groupChunkFiles.push({ file, size: assetSize, modules: chunkModuleList.slice(0, 20) });
+          // Keep the backing JSON exhaustive. Presentation layers may rank or
+          // truncate this list, but the automation ledger must see every row.
+          groupChunkFiles.push({ file, size: assetSize, modules: chunkModuleList });
         }
       }
     }
@@ -230,7 +232,7 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
       removableJSModuleCount: removableJSModules.length,
       removableJSSize,
       nonJSResidualCount,
-      removableJSModules: removableJSModules.sort((a, b) => b.size - a.size).slice(0, 50),
+      removableJSModules: removableJSModules.sort((a, b) => b.size - a.size),
     });
   }
 
