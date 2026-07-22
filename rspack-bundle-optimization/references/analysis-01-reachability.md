@@ -26,7 +26,7 @@ For async groups, try in order:
 2. every dependency under `origin.module.blocks[]`, keeping targets that belong to the group's actual modules;
 3. chunk entry modules as a labeled fallback.
 
-Do not silently accept an empty root set. Report the strategy and data-quality loss.
+Do not silently accept an empty root set. Persist the group with `analysisStatus: "blocked"`, every attempted strategy, and a `missing-root-modules` data-quality issue. The bundled plugin writes the partial evidence and then fails the capture so a rootless group cannot become a zero-impact conclusion.
 
 ## Traversal
 
@@ -66,6 +66,12 @@ Generate `chunk-graph.json` plus `chunk-graph.html`. Every async edge must retai
 - `chunk-graph.html`
 - build command and run-manifest update
 
+Before project wiring, run:
+
+```bash
+node <skill>/scripts/chunk-group-reachability-plugin.template.cjs --self-test
+```
+
 ## Completion Gate
 
 Use the complete `removableJSModules` arrays as the worklist, never a
@@ -73,4 +79,6 @@ display-ranked subset. Every unreachable JS-like member must end as `applied`,
 `validated-opportunity`, `keep`, `risk-found`, `rejected`, or `blocked` after root
 and source inspection. A graph capture with nonzero candidates is
 `review-required`, not completed. If a source change is applied, rerun the
-full audit from a new production baseline pass.
+full audit from a new production baseline pass. A missing root set or failed
+chunk-graph generation is `blocked`; it is never equivalent to zero removable
+modules.

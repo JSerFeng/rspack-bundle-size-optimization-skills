@@ -8,7 +8,18 @@ Explain why every captured export is used, which terminal roots retain it, and w
 
 Capture from the same isolated run and compilation family used for the conclusion. Do not join a newer stats file to stale export edges.
 
-For Rspack builds exposing builtin Rsdoctor export-usage edges, add `scripts/export-usage-capture-plugin.template.cjs` behind an audit flag with `concatenateModules:false`, `usedExports:true`, `minimize:false`, and readable loader output. Pass the already imported `rspack` instance into the plugin.
+For Rspack builds exposing builtin Rsdoctor export-usage edges, add `scripts/export-usage-capture-plugin.template.cjs` behind an audit flag with `concatenateModules:false`, `usedExports:true`, `minimize:false`, and readable loader output. Pass the already imported `rspack` instance into the plugin, plus explicit run/compiler identity and a fresh compiler-specific directory:
+
+```js
+new ExportUsageCapturePlugin({
+  rspack,
+  runId: process.env.RSPACK_AUDIT_RUN_ID,
+  compilerId: "web",
+  outDir: process.env.RSPACK_EXPORT_USAGE_OUT_DIR,
+});
+```
+
+Use a separate `outDir` and unique `compilerId` for every top-level compiler. The plugin refuses a failed build, unsupported Rsdoctor API, missing graph hook, or existing artifact. It writes the raw graph only after the same successful compilation has completed the post-loader source inventory.
 
 If the compiler lacks the required API, use a project-compatible Rsdoctor capture. Missing edges are `blocked`; never replace them with an unlabeled text-search approximation.
 
@@ -26,6 +37,8 @@ node scripts/export-usage-root-analysis.template.cjs \
 ```
 
 Capture all used exports, not only Rollup gaps. Preserve direct references, export-to-export propagation, namespace edges, dependency id, request, consumer-side `loc`, bounded chains, terminal kind, and cap counters.
+
+Both transformation commands validate their input schema, `complete:true`, run id, compiler id, counts, and graph references before producing output. `{}`, malformed arrays, count mismatches, dangling edge endpoints, or capped chains are failure/review evidence, not empty successful captures. Preserve the run/compiler identity through the raw, expanded, and root-analysis artifacts.
 
 ## Chain Correctness
 
@@ -60,6 +73,14 @@ Use post-loader reference sites for every source decision in this route. Analysi
 - per-export/root analysis JSON and Markdown
 - source-confirmed export ledger with coverage
 - whole-module import-cause rows
+
+Before project wiring, run:
+
+```bash
+node <skill>/scripts/export-usage-capture-plugin.template.cjs --self-test
+node <skill>/scripts/build-all-export-usage.template.cjs --self-test
+node <skill>/scripts/export-usage-root-analysis.template.cjs --self-test
+```
 
 ## Completion Gate
 

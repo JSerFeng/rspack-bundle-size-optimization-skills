@@ -1,6 +1,6 @@
 ---
 name: rspack-bundle-optimization
-description: Autonomously audit and optimize Rspack, Rsbuild, or Rspeedy bundles. Use for bundle-size investigations, reductions, optimizations, or measured reports. Exhaust all ten analysis routes and every discovered candidate; data capture alone is never completion. For optimization requests, apply only source-backed, production-measured changes with no observed residual risk, validate them, refresh stale evidence, and repeat to a fixed point. For explicitly read-only requests, perform the same exhaustive analysis without project edits.
+description: Autonomously audit and, when explicitly requested, optimize Rspack, Rsbuild, or Rspeedy bundles. Use for bundle-size investigations, reductions, optimizations, reviews, or measured reports. Exhaust all ten analysis routes and every discovered candidate; data capture alone is never completion. Treat analysis, investigation, review, and report requests as audit-only. Apply project changes only when the user explicitly asks to reduce, optimize, fix, or implement; then require source-backed production measurements, validation, and a fresh fixed-point pass.
 ---
 
 # Rspack Bundle Optimization
@@ -9,9 +9,9 @@ Own the bundle audit from baseline through validated fixed point. Treat the HTML
 
 ## Operating Contract
 
-- Infer `optimize` unless the user explicitly asks for a read-only audit, review, or report.
+- Infer `audit-only` for analysis, investigation, explanation, review, and report requests. Enter `optimize` only when the user explicitly asks to reduce, optimize, fix, apply, or implement changes.
 - In `optimize` mode, inspect source, run experiments, make safe edits, and validate them without handing candidate decisions back to the user.
-- Keep the ten routes and their complete candidate worklists in the host agent's native task plan. Do not create a daemon, controller, queue, or state machine to schedule agent work.
+- Keep the ten high-level routes in the host agent's native task plan. Persist every complete candidate worklist, terminal disposition, route coverage count, and artifact identity under the isolated run directory; never use the task plan or conversation context as the only source of audit state. The ledger is a durable record, not a scheduler; do not create a daemon, controller, or work queue for agent orchestration.
 - Treat analyzer output as evidence. A successful capture command creates work; it does not complete a route that has findings.
 - Continue while runnable or unresolved work remains. Elapsed time, context compaction, a partial report, or one successful optimization is not a stopping condition.
 - Do not commit, push, publish, or change product policy unless the user separately requests it.
@@ -19,7 +19,7 @@ Own the bundle audit from baseline through validated fixed point. Treat the HTML
 ## Fixed-Point Workflow
 
 1. Read applicable `AGENTS.md` files and inspect the project, production command, package manager, compiler version, dirty state, and available validation commands.
-2. Create a fresh isolated run with `scripts/create-audit-run.cjs`. Record commands, fingerprints, outputs, and artifacts in its manifest.
+2. Create a fresh isolated run with `scripts/create-audit-run.cjs`. Record commands, fingerprints, outputs, and artifacts in its manifest, and maintain the generated `candidate-ledger.json` as the durable route/candidate state.
 3. Capture the production baseline and resolved optimization configuration.
 4. Execute all ten routes below. Read each route's reference completely before running it and resolve its complete candidate worklist.
 5. For each candidate, inspect graph evidence, source, package/config context, generated output, and the route-specific risk boundary.
@@ -67,6 +67,8 @@ Record the discovered count for every route. Give every candidate exactly one te
 
 Analyzer labels such as `investigate`, `unknown`, `no-chain`, `source-review-required`, or `review-required` are non-terminal. A route cannot complete until its terminal count equals its discovered count.
 
+Persist each candidate id, evidence, and disposition in `<run>/candidate-ledger.json`; derive the report's per-route coverage from that ledger. Before rendering, run `node <skill>/scripts/create-audit-run.cjs validate-ledger --run-dir <run>`. A missing candidate, non-terminal disposition, duplicate id, inconsistent count, evidence-free decision, incomplete blocker metadata, or underspecified `risk-found` fails validation.
+
 For every `risk-found` candidate, record:
 
 - the concrete failure mode;
@@ -102,6 +104,7 @@ For `blocked`, record the attempted command, exact error, missing prerequisite, 
 ## Script Boundary
 
 - Use bundled scripts for deterministic capture, transformation, byte accounting, comparison, and rendering.
+- Resolve bundled script and reference paths from this skill's directory, not from the audited project's current working directory; only copied or adapted project wiring belongs under the project root.
 - Require machine-readable backing data to remain exhaustive; presentation views may rank or truncate it.
 - Do not let scripts infer semantic safety, side-effect purity, compatibility, or the final candidate disposition.
 - Resolve optional analysis packages from the project. Do not modify the project's dependency manifest solely for audit tooling without user authorization.
@@ -111,7 +114,7 @@ For `blocked`, record the attempted command, exact error, missing prerequisite, 
 After the fixed point:
 
 1. Read `references/html-report-design.md` and `references/optimization-summary-template.md` completely.
-2. Render the report from the final fresh pass with `scripts/render-bundle-report.cjs`.
+2. Validate `candidate-ledger.json`, then render the report from the final fresh pass with `scripts/render-bundle-report.cjs`.
 3. Validate desktop and narrow layouts, interaction, source drill-down, console output, evidence links, and stale-artifact handling.
 4. Perform the agent readability review defined by the report reference and run `--finalize-readability`.
 5. Give the user the local report path or server URL. Keep proprietary source and absolute paths local unless the user requests a redacted publication.
@@ -124,7 +127,8 @@ Return final only when:
 - every route is `completed`, evidence-backed `completed-no-op`, or a genuine `blocked`;
 - every discovered candidate has a fresh, source-backed terminal disposition;
 - every safe positive candidate was applied and validated in `optimize` mode;
-- every unapplied opportunity has concrete residual-risk evidence and a clearing condition;
+- in `optimize` mode, every unapplied opportunity has concrete residual-risk evidence and a clearing condition;
+- in `audit-only` mode, a safe measured `validated-opportunity` may remain unapplied solely because edits were not authorized; record that mode boundary instead of inventing residual risk;
 - the final complete pass applied no new change;
 - no diagnostic or estimated byte count is reported as confirmed savings;
 - every independent route was exhausted despite any blocker;

@@ -14,6 +14,7 @@
 
 Generated from:
 
+- Validated candidate ledger: `[candidate-ledger.json and validate-ledger command]`
 - Baseline summary: `[baseline-summary.json]`
 - Resolved optimization config: `[optimization-config*.json]`
 - Optimization config review: `[optimization-config-check.md]`
@@ -48,18 +49,18 @@ Related analysis pages:
 
 Mandatory audit coverage:
 
-| Check                                                             | State                                     | Fresh artifact / evidence | Result     | Attempted command | Exact error     | Missing prerequisite     | Next command     |
-| ----------------------------------------------------------------- | ----------------------------------------- | ------------------------- | ---------- | ----------------- | --------------- | ------------------------ | ---------------- |
-| Production baseline / resolved optimization config / quick triage | `[completed / completed-no-op / blocked]` | `[paths or evidence]`     | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Chunk-group reachability                                          | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Retained unused modules                                           | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Side-effects A/B                                                  | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Export usage roots and whole-module import causes                 | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Rollup-vs-Rspack export diff                                      | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| CJS-to-ESM package experiment                                     | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| splitChunks A/B                                                   | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| ECMA target experiment                                            | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
-| Post-loader source quality / compactness                          | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Check                                                             | State                                     | Fresh artifact / evidence | Result     | Candidate coverage `[d/t/u/a/r]` | Attempted command | Exact error     | Missing prerequisite     | Next command     |
+| ----------------------------------------------------------------- | ----------------------------------------- | ------------------------- | ---------- | -------------------------------- | ----------------- | --------------- | ------------------------ | ---------------- |
+| Production baseline / resolved optimization config / quick triage | `[completed / completed-no-op / blocked]` | `[paths or evidence]`     | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Chunk-group reachability                                          | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Retained unused modules                                           | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Side-effects A/B                                                  | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Export usage roots and whole-module import causes                 | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Rollup-vs-Rspack export diff                                      | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| CJS-to-ESM package experiment                                     | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| splitChunks A/B                                                   | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| ECMA target experiment                                            | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
+| Post-loader source quality / compactness                          | `[completed / completed-no-op / blocked]` | `[path or evidence]`      | `[result]` | `[0 / 0 / 0 / 0 / 0]`            | `[attempted]`     | `[exact error]` | `[missing prerequisite]` | `[next command]` |
 
 Candidate coverage must also be shown for every row as
 `discovered / terminal / unresolved / applied / risk-found`. A generated

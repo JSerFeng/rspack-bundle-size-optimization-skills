@@ -44,6 +44,59 @@ function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
+function validateExpandedUsage(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') throw new Error('expanded export usage must be a JSON object');
+  if (snapshot.schemaVersion !== 1 || snapshot.kind !== 'rspack-export-usage-expanded') {
+    throw new Error('expanded export usage has an unsupported or missing schema');
+  }
+  if (snapshot.complete !== true) throw new Error('expanded export usage is not marked complete');
+  if (typeof snapshot.generatedAt !== 'string' || !Number.isFinite(Date.parse(snapshot.generatedAt))) {
+    throw new Error('expanded export usage is missing a valid generatedAt timestamp');
+  }
+  if (typeof snapshot.runId !== 'string' || !snapshot.runId.trim()) throw new Error('expanded export usage is missing runId');
+  if (typeof snapshot.compilerId !== 'string' || !snapshot.compilerId.trim()) throw new Error('expanded export usage is missing compilerId');
+  if (typeof snapshot.generatedFrom !== 'string' || !snapshot.generatedFrom.trim()) {
+    throw new Error('expanded export usage is missing generatedFrom');
+  }
+  if (!Array.isArray(snapshot.usages) || !Array.isArray(snapshot.moduleLevelImports)) {
+    throw new Error('expanded export usage must contain usages and moduleLevelImports arrays');
+  }
+  for (const key of ['moduleCount', 'edgeCount', 'usageCount', 'moduleLevelImportCount']) {
+    if (!Number.isInteger(snapshot[key]) || snapshot[key] < 0) {
+      throw new Error(`expanded export usage is missing valid ${key}`);
+    }
+  }
+  if (snapshot.usageCount !== snapshot.usages.length || snapshot.moduleLevelImportCount !== snapshot.moduleLevelImports.length) {
+    throw new Error('expanded export usage counts do not match its arrays');
+  }
+  if (!snapshot.capsInfo) throw new Error('expanded export usage is missing valid capsInfo');
+  for (const key of ['depth', 'chains', 'expand', 'exportsCapped']) {
+    if (!Number.isInteger(snapshot.capsInfo[key]) || snapshot.capsInfo[key] < 0) {
+      throw new Error(`expanded export usage is missing valid capsInfo.${key}`);
+    }
+  }
+  for (const usage of snapshot.usages) {
+    if (typeof usage?.resource !== 'string' || !usage.resource || typeof usage?.exportName !== 'string' || !Array.isArray(usage.chains) || typeof usage.capped !== 'boolean') {
+      throw new Error('expanded export usage contains a malformed usage record');
+    }
+    if (usage.chains.some((chain) => !chain || typeof chain.terminal !== 'string' || !Array.isArray(chain.edges))) {
+      throw new Error('expanded export usage contains a malformed chain record');
+    }
+  }
+  for (const row of snapshot.moduleLevelImports) {
+    if (!row || typeof row.targetResource !== 'string' || !row.targetResource || typeof row.originResource !== 'string' || !row.originResource) {
+      throw new Error('expanded export usage contains a malformed module-level import');
+    }
+  }
+  return snapshot;
+}
+
+function analysisStatus(snapshot, exportsNeedingSourceReview) {
+  return exportsNeedingSourceReview > 0 || snapshot.capsInfo.exportsCapped > 0
+    ? 'review-required'
+    : 'completed-no-op';
+}
+
 function stripQuery(resource) {
   return typeof resource === 'string' ? resource.split('?')[0] : resource;
 }
@@ -502,14 +555,15 @@ function groupRootTriggers(exports) {
 }
 
 function main() {
+  if (args['self-test']) return selfTest();
   if (!existsSync(usagePath)) {
     throw new Error(`Missing exportsUsage snapshot: ${usagePath}`);
   }
 
-  const usageSnapshot = readJson(usagePath);
-  const usageRecords = usageSnapshot.usages || usageSnapshot.exportsUsage || usageSnapshot.records || [];
+  const usageSnapshot = validateExpandedUsage(readJson(usagePath));
+  const usageRecords = usageSnapshot.usages;
   const moduleLevelImports = normalizeModuleLevelImports(
-    usageSnapshot.moduleLevelImports || usageSnapshot.moduleNamespaceImports || usageSnapshot.wholeModuleImports || [],
+    usageSnapshot.moduleLevelImports,
   );
   const moduleLevelImportsByTarget = new Map();
   const moduleLevelImportsByOrigin = new Map();
@@ -817,6 +871,7 @@ function main() {
     exportsNeedingSourceReview,
     confirmationWorklistRootCount: confirmationWorklist.length,
     noChainWorklistCount: noChainWorklist.length,
+    cappedExportCount: usageSnapshot.capsInfo.exportsCapped,
     automationCandidateCount: exportVerdicts.filter((row) => row.verdict !== 'genuinely-used').length,
     wholeModuleImportAuditCount: wholeModuleImportAudits.length,
     verdictDistribution,
@@ -824,7 +879,16 @@ function main() {
   };
 
   const result = {
-    status: exportsNeedingSourceReview > 0 ? 'review-required' : 'completed-no-op',
+    schemaVersion: 1,
+    kind: 'rspack-export-usage-root-analysis',
+    complete: exportsNeedingSourceReview === 0 && usageSnapshot.capsInfo.exportsCapped === 0,
+    generatedAt: new Date().toISOString(),
+    runId: usageSnapshot.runId,
+    compilerId: usageSnapshot.compilerId,
+    status: analysisStatus(usageSnapshot, exportsNeedingSourceReview),
+    dataQuality: usageSnapshot.capsInfo.exportsCapped > 0
+      ? [{ type: 'capped-export-usage-chains', count: usageSnapshot.capsInfo.exportsCapped }]
+      : [],
     summary,
     exportVerdictDistribution,
     exportVerdicts,
@@ -851,6 +915,7 @@ function main() {
   lines.push(`- Export usage records: ${summary.usageCount}`);
   lines.push(`- Records with concrete chains: ${summary.usageWithChains}`);
   lines.push(`- Records without concrete chains: ${summary.noChainCount}`);
+  lines.push(`- Capped/incomplete export traversals: ${summary.cappedExportCount}`);
   lines.push(`- Concrete chain samples: ${summary.chainCount}`);
   lines.push(`- Unique terminal roots: ${summary.uniqueRootCount}`);
   lines.push(`- Unique target exports: ${summary.uniqueTargetExportCount}`);
@@ -1014,4 +1079,31 @@ function main() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-main();
+function selfTest() {
+  const assert = require('assert');
+  assert.throws(() => validateExpandedUsage({}), /unsupported or missing schema/);
+  const valid = {
+    schemaVersion: 1,
+    kind: 'rspack-export-usage-expanded',
+    complete: true,
+    generatedAt: '2026-01-02T03:04:05.000Z',
+    runId: 'run-test',
+    compilerId: 'web',
+    generatedFrom: '/tmp/raw.json',
+    moduleCount: 0,
+    edgeCount: 0,
+    usageCount: 0,
+    moduleLevelImportCount: 0,
+    usages: [],
+    moduleLevelImports: [],
+    capsInfo: { depth: 0, chains: 0, expand: 0, exportsCapped: 0 },
+  };
+  assert.equal(validateExpandedUsage(valid), valid);
+  assert.equal(analysisStatus(valid, 0), 'completed-no-op');
+  assert.equal(analysisStatus({ ...valid, capsInfo: { ...valid.capsInfo, exportsCapped: 1 } }, 0), 'review-required');
+  console.log('export-usage-root-analysis self-test passed');
+}
+
+if (require.main === module) main();
+
+module.exports = { analysisStatus, validateExpandedUsage };

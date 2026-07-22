@@ -2,29 +2,37 @@
 /**
  * Capture the normalized Rspack options used by a real compilation.
  *
- * Default output:
- *   tmp/rspack-optimization/optimization-config[.<compiler-name>].json
+ * Output:
+ *   <outDir>/optimization-config.<safe-run-id>.<safe-compiler-id>.json
  *
  * Direct Rspack wiring (keep it env-gated):
  *   const { OptimizationConfigCheckPlugin } = require('./optimization-config-check-plugin.cjs');
  *   if (process.env.RSPACK_OPT_CONFIG === '1') {
  *     config.plugins ||= [];
- *     config.plugins.push(new OptimizationConfigCheckPlugin());
+ *     config.plugins.push(new OptimizationConfigCheckPlugin({
+ *       runId: process.env.RSPACK_AUDIT_RUN_ID,
+ *       compilerId: 'web',
+ *       outDir: process.env.RSPACK_OPT_CONFIG_OUT_DIR,
+ *     }));
  *   }
  *
  * Rsbuild wiring:
  *   tools: {
  *     rspack(config, { appendPlugins }) {
  *       if (process.env.RSPACK_OPT_CONFIG === '1') {
- *         appendPlugins(new OptimizationConfigCheckPlugin());
+ *         appendPlugins(new OptimizationConfigCheckPlugin({
+ *           runId: process.env.RSPACK_AUDIT_RUN_ID,
+ *           compilerId: 'web',
+ *           outDir: process.env.RSPACK_OPT_CONFIG_OUT_DIR,
+ *         }));
  *       }
  *       return config;
  *     }
  *   }
  */
-const { mkdirSync, readFileSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync, writeFileSync } = require('fs');
 const assert = require('assert');
-const { resolve } = require('path');
+const { basename, resolve } = require('path');
 
 const PLUGIN_NAME = 'OptimizationConfigCheckPlugin';
 
@@ -170,7 +178,7 @@ function rspackVersionInfo(activeCompiler, fallbackCompiler) {
   return row ? { value: row[1], source: row[0] } : { value: null, source: null };
 }
 
-function captureOptions(compilation, fallbackCompiler) {
+function captureOptions(compilation, fallbackCompiler, identity = {}) {
   const activeCompiler = compilation.compiler || fallbackCompiler || {};
   const options = compilation.options || activeCompiler.options || {};
   const optimization = options.optimization || {};
@@ -189,10 +197,14 @@ function captureOptions(compilation, fallbackCompiler) {
 
   return {
     schemaVersion: 1,
+    kind: 'rspack-resolved-optimization-config',
+    generatedAt: new Date().toISOString(),
+    runId: identity.runId || null,
     source: 'compilation.options',
     rspackVersion: version.value,
     rspackVersionSource: version.source,
     compiler: {
+      id: identity.compilerId || null,
       name: activeCompiler.name || options.name || null,
       context: activeCompiler.context || options.context || null,
       mode: options.mode ?? null,
@@ -200,6 +212,7 @@ function captureOptions(compilation, fallbackCompiler) {
       output: {
         module: options.output?.module ?? null,
         libraryType: options.output?.library?.type ?? null,
+        environment: summarize(options.output?.environment),
       },
     },
     optimization: capturedOptimization,
@@ -229,11 +242,17 @@ function selfTest() {
         },
       },
     },
-  }, compiler);
+  }, compiler, { runId: 'run-test', compilerId: 'web' });
   assert.equal(snapshot.rspackVersion, '2.1.4');
   assert.equal(snapshot.rspackVersionSource, 'compiler.rspack.rspackVersion');
+  assert.equal(snapshot.runId, 'run-test');
+  assert.equal(snapshot.compiler.id, 'web');
   assert.equal(snapshot.optimization.splitChunks.minSizeReduction, 400_000);
   assert.equal(snapshot.optimization.splitChunks.cacheGroups.default.minSizeReduction, 400_000);
+  assert.throws(() => captureIdentity({}, compiler), /runId is required/);
+  assert.throws(() => captureIdentity({ runId: 'run', compilerId: 'web', outDir: 'tmp/audit', fileName: '../escape.json' }, compiler), /plain filename/);
+  const identity = captureIdentity({ runId: 'run/test', compilerId: 'web:client', outDir: 'tmp/audit' }, compiler);
+  assert.equal(identity.fileName, 'optimization-config.run-test.web-client.json');
   process.stdout.write('optimization-config-check-plugin self-test passed\n');
 }
 
@@ -241,7 +260,23 @@ function safeFilePart(value) {
   return String(value || '')
     .trim()
     .replace(/[^a-zA-Z0-9_.-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/^-+|-+$/g, '') || 'unnamed';
+}
+
+function captureIdentity(options, compiler) {
+  const runId = String(options.runId || process.env.RSPACK_AUDIT_RUN_ID || '').trim();
+  const compilerId = String(options.compilerId || '').trim();
+  const requestedOutDir = options.outDir || process.env.RSPACK_OPT_CONFIG_OUT_DIR;
+  if (!runId) throw new Error(`${PLUGIN_NAME}: runId is required`);
+  if (!compilerId) throw new Error(`${PLUGIN_NAME}: compilerId is required and must be unique per top-level compiler`);
+  if (!requestedOutDir) throw new Error(`${PLUGIN_NAME}: outDir is required and must point inside the isolated audit run`);
+  const baseDir = compiler.context || process.cwd();
+  const outDir = resolve(baseDir, requestedOutDir);
+  const fileName = options.fileName || `optimization-config.${safeFilePart(runId)}.${safeFilePart(compilerId)}.json`;
+  if (basename(fileName) !== fileName || fileName === '.' || fileName === '..' || !/^[a-zA-Z0-9_.-]+$/.test(fileName)) {
+    throw new Error(`${PLUGIN_NAME}: fileName must be a plain filename without directory components`);
+  }
+  return { runId, compilerId, outDir, fileName };
 }
 
 class OptimizationConfigCheckPlugin {
@@ -250,35 +285,26 @@ class OptimizationConfigCheckPlugin {
   }
 
   apply(compiler) {
-    compiler.hooks.thisCompilation.tap(PLUGIN_NAME, (compilation) => {
-      try {
-        const snapshot = captureOptions(compilation, compiler);
-        const compilerName = safeFilePart(snapshot.compiler.name);
-        const fileName = this.options.fileName ||
-          `optimization-config${compilerName ? `.${compilerName}` : ''}.json`;
-        const baseDir = compiler.context || process.cwd();
-        const outDir = this.options.outDir
-          ? resolve(baseDir, this.options.outDir)
-          : resolve(baseDir, 'tmp/rspack-optimization');
-        const outPath = resolve(outDir, fileName);
-        const contents = `${JSON.stringify(snapshot, null, 2)}\n`;
-
-        let previous = null;
-        try { previous = readFileSync(outPath, 'utf8'); } catch {}
-        if (previous === contents) return;
-
-        mkdirSync(outDir, { recursive: true });
-        writeFileSync(outPath, contents);
-        console.log(`[${PLUGIN_NAME}] ${outPath}`);
-      } catch (error) {
-        console.error(`[${PLUGIN_NAME}] failed`, error?.stack || error);
+    const identity = captureIdentity(this.options, compiler);
+    compiler.hooks.done.tap(PLUGIN_NAME, (stats) => {
+      if (typeof stats.hasErrors === 'function' && stats.hasErrors()) {
+        throw new Error(`${PLUGIN_NAME}: refusing to write a resolved-config artifact for a failed compilation`);
       }
+      const snapshot = captureOptions(stats.compilation, compiler, identity);
+      const outPath = resolve(identity.outDir, identity.fileName);
+      if (existsSync(outPath)) {
+        throw new Error(`${PLUGIN_NAME}: refusing to overwrite an existing audit artifact: ${outPath}`);
+      }
+      mkdirSync(identity.outDir, { recursive: true });
+      writeFileSync(outPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+      console.log(`[${PLUGIN_NAME}] ${outPath}`);
     });
   }
 }
 
 module.exports = {
   OptimizationConfigCheckPlugin,
+  captureIdentity,
   captureOptions,
 };
 

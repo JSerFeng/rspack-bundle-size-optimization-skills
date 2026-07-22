@@ -86,21 +86,24 @@ Legacy `*ReductionBytes` and `retained*Modules` input names are accepted by the 
 
 ## Capture the AppJs-Scoped Module Set and Post-Loader Sources
 
-Copy or adapt `scripts/ecma-module-capture-plugin.template.cjs` into the project and wire it behind an environment flag. Use one explicit `compilerId` and output file per top-level compiler:
+Copy or adapt `scripts/ecma-compilation-tree-capture-plugin.template.cjs` into the project and wire it behind an environment flag. This wrapper uses the lower-level `ecma-module-capture-plugin.template.cjs` for each active compilation partition and is the default capture path because appJs assets may be owned by child compilations such as worker or loader compilers.
+
+Use one explicit `compilerId`, fresh output directory, and index file per top-level compiler:
 
 ```js
 const {
-  EcmaModuleCapturePlugin,
-} = require("<skill>/scripts/ecma-module-capture-plugin.template.cjs");
+  EcmaCompilationTreeCapturePlugin,
+} = require("<skill>/scripts/ecma-compilation-tree-capture-plugin.template.cjs");
 
 if (process.env.RSPACK_ECMA_CAPTURE === "1") {
   config.plugins ||= [];
   config.plugins.push(
-    new EcmaModuleCapturePlugin({
+    new EcmaCompilationTreeCapturePlugin({
       runId: process.env.RSPACK_AUDIT_RUN_ID,
       variant: process.env.RSPACK_ECMA_VARIANT,
       compilerId: "web",
-      outFile: process.env.RSPACK_ECMA_INVENTORY,
+      outDir: process.env.RSPACK_ECMA_OUT_DIR,
+      indexFile: process.env.RSPACK_ECMA_INDEX,
       appJsRuleId:
         "<the same persisted inclusion-rule id used by the size metric>",
       appJsAssetFilter(name, info) {
@@ -111,7 +114,7 @@ if (process.env.RSPACK_ECMA_CAPTURE === "1") {
 }
 ```
 
-`appJsAssetFilter` runs against the emitted assets and persists the exact selected list. Alternatively pass `appJsAssets` or `appJsAssetManifest`. Never rely on the plugin to infer all JavaScript implicitly.
+`appJsAssetFilter` runs against the top-level emitted assets and persists the exact selected list. Never rely on the plugin to infer all JavaScript implicitly. The tree index proves which compilation owns each selected asset, visits inactive child partitions explicitly, and writes one module inventory per active partition without merging canonical identities across compilers.
 
 Run the otherwise unchanged baseline and target-policy builds sequentially:
 
@@ -119,17 +122,21 @@ Run the otherwise unchanged baseline and target-policy builds sequentially:
 RSPACK_ECMA_CAPTURE=1 \
 RSPACK_AUDIT_RUN_ID=<run-id> \
 RSPACK_ECMA_VARIANT=baseline \
-RSPACK_ECMA_INVENTORY=<run>/ecma/module-inventory-baseline.json \
+RSPACK_ECMA_OUT_DIR=<run>/ecma/baseline \
+RSPACK_ECMA_INDEX=<run>/ecma/module-inventory-baseline.index.json \
 <production-build-command>
 
 RSPACK_ECMA_CAPTURE=1 \
 RSPACK_AUDIT_RUN_ID=<run-id> \
 RSPACK_ECMA_VARIANT=target-policy \
-RSPACK_ECMA_INVENTORY=<run>/ecma/module-inventory-experiment.json \
+RSPACK_ECMA_OUT_DIR=<run>/ecma/target-policy \
+RSPACK_ECMA_INDEX=<run>/ecma/module-inventory-experiment.index.json \
 <target-policy-build-command>
 ```
 
-For multiple top-level compilers, repeat the complete pair with compiler-specific filenames and never merge their counts. A child compiler is not part of the web compiler's module count unless its assets are explicitly part of that compiler's persisted appJs metric.
+For multiple top-level compilers, repeat the complete pair with unique compiler ids, directories, and index filenames; never merge their counts. Within one top-level compiler, compare only baseline/experiment partitions with the same stable `partitionId`. Every selected appJs asset must have exactly one compilation owner, the selected-asset union must match the index, and every active partition inventory must be complete. Ambiguous partition signatures, missing/multiple asset owners, incomplete inventories, or a baseline/experiment partition mismatch block the ECMA conclusion.
+
+The old single-compilation `EcmaModuleCapturePlugin` remains a lower-level helper and is valid only when evidence proves the selected appJs asset set has no child-compilation owners. Do not use it as the default merely because the top-level compiler produced the final output directory.
 
 The capture scope is logical modules connected through selected appJs chunks. Concatenated inner modules inherit their container's chunk membership and count as logical modules; concatenated containers are recorded separately and do not inflate the logical-module count. Runtime, external, context, and virtual modules are categorized explicitly.
 
@@ -150,8 +157,8 @@ Use final minified source maps from builds with the same target-policy variables
 node scripts/sourcemap-generated-byte-attribution.cjs \
   --baseline-dir <run>/baseline/dist \
   --experiment-dir <run>/ecma/dist \
-  --baseline-asset-manifest <run>/ecma/module-inventory-baseline.json \
-  --experiment-asset-manifest <run>/ecma/module-inventory-experiment.json \
+  --baseline-asset-manifest <run>/ecma/module-inventory-baseline.index.json \
+  --experiment-asset-manifest <run>/ecma/module-inventory-experiment.index.json \
   --baseline-reviewed-unmapped-manifest <run>/ecma/reviewed-unmapped-baseline.json \
   --experiment-reviewed-unmapped-manifest <run>/ecma/reviewed-unmapped-experiment.json \
   --project-root <project-root> \
@@ -159,7 +166,9 @@ node scripts/sourcemap-generated-byte-attribution.cjs \
   --out <run>/ecma/generated-byte-attribution.json
 ```
 
-The inventory files are valid asset manifests because they persist `scope.appJsAssets`. The script must analyze exactly those assets; its recursive all-JS fallback is not valid for an audit conclusion.
+The compilation-tree index files are valid asset manifests because they persist the complete top-level `scope.appJsAssets`. The script must analyze exactly those assets; its recursive all-JS fallback is not valid for an audit conclusion.
+
+This index-scoped attribution reconciles the headline appJs delta. Also run the same command once per matching compilation partition, using that partition's baseline and experiment inventory files as the two asset manifests and a partition-specific output path. A partition inventory persists only the assets owned by that compilation, so its attribution is the input to that partition's module diff. Do not pass the aggregate all-appJs attribution to a partition diff whose asset scope is narrower.
 
 The attribution tool must use the same gzip metric as the emitted-asset measurement: compress each selected asset independently with Node `zlib.gzipSync(..., { level: 9 })`, then sum the compressed byte counts. Record that level in the attribution artifact; do not compare its default-level gzip output with a level-9 headline.
 
@@ -197,18 +206,20 @@ Keep emitted asset raw/gzip totals as the headline. Source-map attribution expla
 
 ## Build the Module Diff and Source Review Worklist
 
-Run one comparison per compiler:
+Read both tree indexes, pair active partitions by the same stable `partitionId`, and run one comparison per matching partition. For example, the root `web` partition uses:
 
 ```bash
 node scripts/ecma-module-diff.cjs \
-  --baseline <run>/ecma/module-inventory-baseline.json \
-  --experiment <run>/ecma/module-inventory-experiment.json \
-  --generated-attribution <run>/ecma/generated-byte-attribution.json \
+  --baseline <run>/ecma/baseline/module-inventory.web.json \
+  --experiment <run>/ecma/target-policy/module-inventory.web.json \
+  --generated-attribution <run>/ecma/attribution/web/generated-byte-attribution.json \
   --require-generated-attribution \
-  --out-dir <run>/ecma
+  --out-dir <run>/ecma/diffs/web
 ```
 
-This writes:
+Repeat for every child partition listed as active in either index. Do not compare a child inventory to the root inventory, deduplicate matching canonical keys across partitions, or omit a partition that appears on only one side; a missing pair is a graph change requiring explicit resolution.
+
+Each partition comparison writes:
 
 - `ecma/module-diff.json`;
 - `ecma/post-loader-source-diff.json`;
@@ -276,9 +287,10 @@ If every applicable stage already uses the comparison target, record evidence-ba
 
 - coordinated baseline/experiment target-policy diff;
 - baseline and experiment appJs asset manifests and raw/gzip totals;
+- baseline and experiment compilation-tree indexes, including every visited active/inactive partition and exact selected-asset ownership;
 - module, chunk, runtime, helper, and polyfill inventories for both variants;
-- canonical module diff with ambiguous joins kept separate;
-- per-source generated-byte attribution and mapped/unmapped reconciliation;
+- canonical module diff per matching compilation partition, with ambiguous joins and unmatched partitions kept separate;
+- aggregate and per-partition generated-byte attribution with mapped/unmapped reconciliation;
 - complete post-loader source review worklist and agent-authored source-diff conclusions;
 - failed-command/retry ledger and production A/B rewrite results.
 
@@ -287,12 +299,13 @@ If every applicable stage already uses the comparison target, record evidence-ba
 Run these before wiring project builds when the skill was freshly updated or copied:
 
 ```bash
+node scripts/ecma-compilation-tree-capture-plugin.template.cjs --self-test
 node scripts/ecma-module-capture-plugin.template.cjs --self-test
 node scripts/sourcemap-generated-byte-attribution.cjs --self-test
 node scripts/ecma-module-diff.cjs --self-test
 ```
 
-The capture self-test covers query/fragment identity, concatenated-container separation, UTF-8 byte counts, issuers, and collision detection. The source-map self-test covers explicit appJs selection, preserved source query/fragment, highest-version pnpm fallback, and deterministic tie-breaking. The diff self-test covers added/removed/retained/ambiguous classification, one-to-one generated-byte joining, source diffs, hash validation, and artifact generation.
+The compilation-tree self-test covers root/child/inactive partitions, exact asset ownership, stable child registration identity across content-hash changes, and real Rspack version selection. The module capture self-test covers query/fragment identity, concatenated-container separation, UTF-8 byte counts, issuers, and collision detection. The source-map self-test covers explicit appJs selection, preserved source query/fragment, highest-version pnpm fallback, and deterministic tie-breaking. The diff self-test covers added/removed/retained/ambiguous classification, one-to-one generated-byte joining, source diffs, hash validation, and artifact generation.
 
 ## Completion Gate
 

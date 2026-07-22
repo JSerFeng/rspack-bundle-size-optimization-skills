@@ -114,14 +114,69 @@ function mergeText(left, right) {
   return `${left}\n${right}`;
 }
 
+function assertUniqueIds(rows, label) {
+  const seen = new Set();
+  for (const row of rows) {
+    if (seen.has(row.id)) throw new Error(`Duplicate ${label} id: ${row.id}`);
+    seen.add(row.id);
+  }
+}
+
 function hasEvidence(value) {
-  if (Array.isArray(value)) return value.length > 0;
-  if (value && typeof value === 'object') return Object.keys(value).length > 0;
-  return typeof value === 'string' ? value.trim().length > 0 : Boolean(value);
+  if (Array.isArray(value)) return value.some(hasEvidence);
+  if (value && typeof value === 'object') return Object.values(value).some(hasEvidence);
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+const COVERAGE_KEYS = ['discovered', 'terminal', 'unresolved', 'applied', 'riskFound'];
+
+function appendIssue(current, issue) {
+  if (!issue) return current || null;
+  return current ? `${current}\n${issue}` : issue;
+}
+
+function normalizeCoverage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { coverage: null, errors: ['candidate coverage is required'] };
+  }
+  const coverage = {};
+  const errors = [];
+  for (const key of COVERAGE_KEYS) {
+    const raw = value[key];
+    if (raw === '' || raw === null || raw === undefined || !Number.isInteger(Number(raw)) || Number(raw) < 0) {
+      errors.push(`coverage.${key} must be a non-negative integer`);
+    } else {
+      coverage[key] = Number(raw);
+    }
+  }
+  if (errors.length === 0) {
+    if (coverage.terminal > coverage.discovered) {
+      errors.push('coverage.terminal cannot exceed coverage.discovered');
+    }
+    if (coverage.unresolved !== coverage.discovered - coverage.terminal) {
+      errors.push('coverage.unresolved must equal coverage.discovered - coverage.terminal');
+    }
+    if (coverage.applied > coverage.terminal) {
+      errors.push('coverage.applied cannot exceed coverage.terminal');
+    }
+    if (coverage.riskFound > coverage.terminal) {
+      errors.push('coverage.riskFound cannot exceed coverage.terminal');
+    }
+    if (coverage.applied + coverage.riskFound > coverage.terminal) {
+      errors.push('coverage.applied + coverage.riskFound cannot exceed coverage.terminal');
+    }
+  }
+  return { coverage, errors };
 }
 
 function normalizeChecks(inputChecks) {
-  const byId = new Map((inputChecks || []).map((check) => [check.id, check]));
+  const rows = inputChecks || [];
+  if (!Array.isArray(rows)) throw new Error('checks must be an array');
+  for (const row of rows) {
+    if (!row || typeof row.id !== 'string' || !row.id) throw new Error('Every check row must have a non-empty string id');
+  }
+  assertUniqueIds(rows, 'check');
+  const byId = new Map(rows.map((check) => [check.id, check]));
   return CHECKS.map(([id, name]) => {
     const value = byId.get(id);
     if (!value) return {
@@ -131,28 +186,55 @@ function normalizeChecks(inputChecks) {
       result: '报告输入缺少该检查',
       evidence: null,
       command: null,
-      attemptedCommand: null,
+      attemptedCommand: 'not recorded: normalized check row is absent',
       error: 'missing normalized check row',
       missingPrerequisite: 'normalized check row',
-      nextCommand: null,
+      nextCommand: `add the ${id} check row with fresh evidence and candidate coverage, then rerender`,
+      coverage: null,
+      requestedState: null,
     };
     let state = STATES.has(value.state) ? value.state : 'blocked';
+    const requestedState = value.state;
     const evidence = value.evidence ?? value.artifact ?? null;
+    const result = typeof value.result === 'string' ? value.result.trim() : '';
     let error = value.error || value.exactError || null;
     let missingPrerequisite = value.missingPrerequisite || null;
-    const attemptedCommand = value.attemptedCommand || value.command || null;
-    const nextCommand = value.nextCommand || null;
-    if (state === 'completed-no-op' && !hasEvidence(evidence)) {
+    let attemptedCommand = value.attemptedCommand || value.command || null;
+    let nextCommand = value.nextCommand || null;
+    const { coverage, errors: coverageErrors } = normalizeCoverage(value.coverage);
+    const validationErrors = [...coverageErrors];
+    if (!hasEvidence(evidence)) validationErrors.push(`${state} requires fresh evidence`);
+    if (!result) validationErrors.push(`${state} requires a non-empty result`);
+    if (state !== 'blocked') {
+      if (coverage && coverage.unresolved !== 0) validationErrors.push(`${state} requires coverage.unresolved to be zero`);
+      if (coverage && coverage.terminal !== coverage.discovered) validationErrors.push(`${state} requires terminal coverage for every discovered candidate`);
+    }
+    if (validationErrors.length > 0) {
       state = 'blocked';
-      error = error || 'completed-no-op requires fresh evidence';
-      missingPrerequisite = missingPrerequisite || 'fresh evidence artifact for the no-op conclusion';
+      error = appendIssue(error, validationErrors.join('; '));
+      missingPrerequisite = appendIssue(missingPrerequisite, 'valid fresh evidence and complete candidate coverage');
+      nextCommand = nextCommand || 'regenerate this normalized check row from the final fresh audit pass';
+    }
+    if (state === 'blocked') {
+      const missingBlockedFields = [];
+      if (!attemptedCommand) missingBlockedFields.push('attemptedCommand');
+      if (!error) missingBlockedFields.push('error');
+      if (!missingPrerequisite) missingBlockedFields.push('missingPrerequisite');
+      if (!nextCommand) missingBlockedFields.push('nextCommand');
+      if (missingBlockedFields.length > 0) {
+        error = appendIssue(error, `blocked check is missing fields: ${missingBlockedFields.join(', ')}`);
+        missingPrerequisite = appendIssue(missingPrerequisite, 'complete blocked-check failure metadata');
+        attemptedCommand = attemptedCommand || 'not recorded';
+        nextCommand = nextCommand || 'record the failed attempt and exact unblock command';
+      }
     }
     return {
       id,
       name: value.name || name,
       state,
-      result: value.result || (state === 'blocked' ? '缺少明确结果' : ''),
+      result: result || (state === 'blocked' ? '缺少明确结果' : ''),
       evidence,
+      coverage,
       // Kept for old consumers. New reports distinguish what was attempted
       // from the exact command that should be run next.
       command: attemptedCommand || nextCommand,
@@ -160,6 +242,7 @@ function normalizeChecks(inputChecks) {
       error,
       missingPrerequisite,
       nextCommand,
+      requestedState,
     };
   });
 }
@@ -389,6 +472,7 @@ function normalizeReport(input, title) {
     const id = source.id || stableId(path, 'source');
     return {
       id,
+      shardKey: stableId(id, 'source-shard'),
       path,
       language: source.language || 'javascript',
       quality: source.quality || null,
@@ -404,6 +488,7 @@ function normalizeReport(input, title) {
     const sourceId = item.sourceId || (sourceIds.has(item.id) ? item.id : null);
     return {
       id,
+      shardKey: stableId(id, 'detail-shard'),
       title: item.title || item.name || basename(path),
       modulePath: path,
       status: item.status || item.class || 'candidate',
@@ -449,6 +534,7 @@ function normalizeReport(input, title) {
     sourceId: item.sourceId || null,
     validation: item.validation || item.nextValidation || '',
   })).sort((a, b) => b.rawSavingBytes - a.rawSavingBytes || a.title.localeCompare(b.title));
+  assertUniqueIds(optimizations, 'optimization');
 
   const itemById = new Map(items.map((item) => [item.id, item]));
   const itemByTitle = new Map(items.map((item) => [item.title, item]));
@@ -489,6 +575,15 @@ function normalizeReport(input, title) {
     items.push(detailItem);
     itemById.set(detailItem.id, detailItem);
     itemByTitle.set(detailItem.title, detailItem);
+  }
+  assertUniqueIds(items, 'detail item');
+  assertUniqueIds(sources, 'source');
+  assertUniqueIds(items.map((item) => ({ id: item.shardKey })), 'detail shard key');
+  assertUniqueIds(sources.map((source) => ({ id: source.shardKey })), 'source shard key');
+  for (const item of items) {
+    if (item.sourceId != null && !sourceIds.has(item.sourceId)) {
+      throw new Error(`Detail item ${item.id} references missing source id: ${item.sourceId}`);
+    }
   }
   const measurement = {
     raw: '产物文件未压缩字节数；报告排序和结论的主指标',
@@ -571,11 +666,13 @@ function makeWorker(){var code="onmessage=function(e){var p=e.data;try{if(p.type
 function workerRequest(kind,payload,timeout){return new Promise(function(resolve,reject){var worker=makeWorker(),done=false,timer=setTimeout(function(){if(done)return;done=true;worker.terminate();reject(new Error('搜索超时，已取消'))},timeout);if(kind==='filter'){if(filterWorker)filterWorker.terminate();filterWorker=worker}else{if(sourceWorker)sourceWorker.terminate();sourceWorker=worker}worker.onmessage=function(event){if(done)return;done=true;clearTimeout(timer);worker.terminate();if(event.data.ok)resolve(event.data.result);else reject(new Error(event.data.error))};worker.onerror=function(){if(done)return;done=true;clearTimeout(timer);worker.terminate();reject(new Error('搜索 Worker 失败'))};worker.postMessage(payload)})}
 function debounce(fn,wait){var timer;return function(){var args=arguments;clearTimeout(timer);timer=setTimeout(function(){fn.apply(null,args)},wait)}}
 function cacheSet(key,value){var size=JSON.stringify(value).length;if(size>CACHE_LIMIT)return;while(cacheBytes+size>CACHE_LIMIT&&cache.size){var first=cache.keys().next().value;cacheBytes-=cache.get(first).size;cache.delete(first)}cache.set(key,{value:value,size:size});cacheBytes+=size}
-async function loadShard(kind,id,signal){var key=kind+'/'+id;if(cache.has(key)){var hit=cache.get(key);cache.delete(key);cache.set(key,hit);return hit.value}if(embedded[key]){cacheSet(key,embedded[key]);return embedded[key]}var response=await fetch('data/'+kind+'/'+encodeURIComponent(id)+'.json',{signal:signal,cache:'no-store'});if(!response.ok)throw new Error('加载失败 HTTP '+response.status);var value=await response.json();if(value.runId!==core.runId)throw new Error('数据 runId 与报告不一致，拒绝混用旧产物');cacheSet(key,value);return value}
+function validateShard(value,expectedId){if(value.runId!==core.runId)throw new Error('数据 runId 与报告不一致，拒绝混用旧产物');if(expectedId&&value.id!==expectedId)throw new Error('数据 id 与核心索引不一致，拒绝显示错误分片');return value}
+async function loadShard(kind,shardKey,expectedId,signal){var key=kind+'/'+shardKey;if(cache.has(key)){var hit=cache.get(key);cache.delete(key);cache.set(key,hit);return validateShard(hit.value,expectedId)}if(embedded[key]){var embeddedValue=validateShard(embedded[key],expectedId);cacheSet(key,embeddedValue);return embeddedValue}var response=await fetch('data/'+kind+'/'+encodeURIComponent(shardKey)+'.json',{signal:signal,cache:'no-store'});if(!response.ok)throw new Error('加载失败 HTTP '+response.status);var value=validateShard(await response.json(),expectedId);cacheSet(key,value);return value}
 function renderHeader(){document.title=core.title;$('#report-title').textContent=core.title;$('#run-id').textContent=core.runId;$('#overall-state').textContent=core.overallStatus==='complete'?'完整':'不完整';$('#module-count').textContent=core.items.length.toLocaleString();$('#hero-headline').textContent=core.summary.headline;$('#hero-statement').textContent=core.summary.statement||'未提供总结';$('#next-action-text').textContent=core.summary.nextAction||'查看检查矩阵与候选明细';$('#metric-raw').textContent=fmtBytes(core.summary.confirmedRawSavingBytes);$('#metric-gzip').textContent=fmtBytes(core.summary.confirmedGzipSavingBytes);$('#metric-unquantified').textContent=Number(core.summary.unquantifiedCount||0).toLocaleString();$('#metric-candidate').textContent=fmtBytes(core.summary.candidateRawBytes);$('#metric-diagnostic').textContent=fmtBytes(core.summary.diagnosticRawBytes);$('#perf-core').textContent=fmtBytes(core.performance.coreJsonBytes);$('#perf-source').textContent=fmtBytes(core.performance.sourceBytes);$('#perf-mode').textContent=core.performance.useServer?'本地服务器 / 按需分片':'小报告 / file:// 可用';if(core.performance.useServer&&location.protocol==='file:'){$('#server-warning').classList.add('visible');$('#server-command').textContent=core.performance.serveCommand}}
 function checkEvidence(value){if(value==null||value==='')return '未生成';return typeof value==='string'?value:JSON.stringify(value)}
+function coverageText(value){if(!value)return '未提供';return value.terminal+'/'+value.discovered+' terminal · '+value.unresolved+' unresolved · '+value.applied+' applied · '+value.riskFound+' risk'}
 function checkBlockHtml(c){var rows=[];if(c.attemptedCommand)rows.push('<div><b>已尝试</b><code>'+esc(c.attemptedCommand)+'</code></div>');if(c.error)rows.push('<div><b>精确错误</b><code>'+esc(c.error)+'</code></div>');if(c.missingPrerequisite)rows.push('<div><b>缺失前置</b><span>'+esc(c.missingPrerequisite)+'</span></div>');if(c.nextCommand)rows.push('<div><b>下一命令</b><code>'+esc(c.nextCommand)+'</code></div>');return rows.length?'<div class="check-block">'+rows.join('')+'</div>':'—'}
-function renderChecks(){var tbody=$('#checks-body');tbody.innerHTML=core.checks.map(function(c){var hasBlockedDetail=Boolean(c.error||c.missingPrerequisite||c.nextCommand),summary='<tr class="check-summary-row'+(hasBlockedDetail?' has-detail':'')+'"><td>'+esc(c.name)+'</td><td><span class="chip '+esc(c.state)+'">'+esc(stateLabel(c.state))+'</span></td><td>'+esc(c.result)+'</td><td><code>'+esc(checkEvidence(c.evidence))+'</code></td><td>'+(hasBlockedDetail?'<span class="check-detail-pointer">失败原因与补跑命令如下</span>':checkBlockHtml(c))+'</td></tr>';return hasBlockedDetail?summary+'<tr class="check-detail-row"><td colspan="5">'+checkBlockHtml(c)+'</td></tr>':summary}).join('')}
+function renderChecks(){var tbody=$('#checks-body');tbody.innerHTML=core.checks.map(function(c){var hasBlockedDetail=Boolean(c.error||c.missingPrerequisite||c.nextCommand),summary='<tr class="check-summary-row'+(hasBlockedDetail?' has-detail':'')+'"><td>'+esc(c.name)+'</td><td><span class="chip '+esc(c.state)+'">'+esc(stateLabel(c.state))+'</span></td><td>'+esc(c.result)+'</td><td><code>'+esc(coverageText(c.coverage))+'</code></td><td><code>'+esc(checkEvidence(c.evidence))+'</code></td><td>'+(hasBlockedDetail?'<span class="check-detail-pointer">失败原因与补跑命令如下</span>':checkBlockHtml(c))+'</td></tr>';return hasBlockedDetail?summary+'<tr class="check-detail-row"><td colspan="6">'+checkBlockHtml(c)+'</td></tr>':summary}).join('')}
 function optimizationTableHtml(rows,emptyText){return rows.length?rows.map(function(row){var title=row.detailItemId?'<a href="#item='+encodeURIComponent(row.detailItemId)+'">'+esc(row.title)+'</a>':esc(row.title);return '<tr><td>'+title+'</td><td><span class="chip '+esc(row.status||'candidate')+'">'+esc(stateLabel(row.status||'candidate'))+'</span></td><td>'+esc(row.classification||'')+'</td><td class="num">'+fmtBytes(row.rawSavingBytes)+'</td><td class="num">'+fmtBytes(row.gzipSavingBytes)+'</td><td>'+esc(row.why||'')+'</td><td><code>'+esc(row.validation||'')+'</code></td></tr>'}).join(''):'<tr><td class="empty-row" colspan="7">'+esc(emptyText)+'</td></tr>'}
 function rowByteSuffix(row){if(!row||typeof row==='string')return '';var value=row.deltaBytes;if(value==null)value=row.bytes;if(value==null&&row.savedBytes!=null)value=-Number(row.savedBytes);return value==null?'':' · '+fmtBytes(value)}
 function listSummary(value){if(!Array.isArray(value))return '未提供';if(!value.length)return '0 项';return value.length+' 项：'+value.slice(0,4).map(function(row){return typeof row==='string'?row:(row.modulePath||row.path||row.name||row.label||JSON.stringify(row))+rowByteSuffix(row)}).join('；')+(value.length>4?'…':'')}
@@ -629,8 +726,8 @@ function highlightText(value,query){if(!query||$('#regex-mode').checked)return e
 function renderList(){var viewport=$('#module-list'),spacer=$('#module-spacer'),scrollTop=viewport.scrollTop,height=viewport.clientHeight,start=Math.max(0,Math.floor(scrollTop/ROW_HEIGHT)-OVERSCAN),end=Math.min(filtered.length,Math.ceil((scrollTop+height)/ROW_HEIGHT)+OVERSCAN),query=$('#module-search').value.trim();spacer.style.height=(filtered.length*ROW_HEIGHT)+'px';spacer.innerHTML='';for(var pos=start;pos<end;pos++){var item=core.items[filtered[pos]],button=document.createElement('button');button.className='module-row'+(item.id===selectedId?' selected':'');button.style.transform='translateY('+(pos*ROW_HEIGHT)+'px)';button.dataset.itemId=item.id;button.setAttribute('aria-pressed',item.id===selectedId?'true':'false');button.innerHTML='<div class="module-top"><span class="module-title">'+highlightText(item.title,query)+'</span><span class="chip '+esc(item.status)+'">'+esc(stateLabel(item.status))+'</span></div><div class="module-path">'+highlightText(item.modulePath,query)+'</div><div class="module-foot"><span>unused <strong>'+fmtBytes(item.unusedBytes)+'</strong></span><span>raw save '+fmtBytes(item.rawSavingBytes)+'</span></div>';spacer.appendChild(button)}$('#visible-count').textContent=filtered.length.toLocaleString()+' / '+core.items.length.toLocaleString()}
 async function applyFilter(){var query=$('#module-search').value.trim(),regex=$('#regex-mode').checked,error=$('#search-error');error.textContent='';if(regex){var unsafe=safeRegex(query);if(unsafe){error.textContent=unsafe;return}}var rows=core.items.map(function(item){return (item.title+'\n'+item.modulePath+'\n'+item.why).toLowerCase()});try{var found=await workerRequest('filter',{type:'filter',query:query,regex:regex,rows:rows},500);var sorted=sortItems(found.map(function(index){return core.items[index]}));var indexById=new Map(core.items.map(function(item,index){return [item.id,index]}));filtered=sorted.map(function(item){return indexById.get(item.id)});$('#module-list').scrollTop=0;renderList()}catch(err){error.textContent=err.message}}
 function evidenceHtml(evidence){if(!Array.isArray(evidence)||!evidence.length)return '<p>未提供结构化证据。</p>';return '<ul class="evidence-list">'+evidence.map(function(row){return '<li>'+esc(typeof row==='string'?row:(row.label||row.path||JSON.stringify(row)))+'</li>'}).join('')+'</ul>'}
-async function selectItem(id){var item=core.items.find(function(row){return row.id===id});if(!item)return;selectedId=id;history.replaceState(null,'','#item='+encodeURIComponent(id));renderList();requestVersion++;var version=requestVersion;if(detailController)detailController.abort();detailController=new AbortController();$('#selected-detail').innerHTML='<div class="loading">正在按需加载明细…</div>';try{var shard=await loadShard('details',id,detailController.signal);if(version!==requestVersion)return;var d=shard.detail||{},links=Array.isArray(d.links)?d.links:[];$('#selected-detail').innerHTML='<div class="detail-header"><div><h4>'+esc(item.title)+'</h4><div class="detail-path">'+esc(item.modulePath)+'</div></div><span class="chip '+esc(item.status)+'">'+esc(stateLabel(item.status))+'</span></div><div class="detail-body"><div class="detail-grid"><div class="fact"><h5>结果</h5><p>'+esc(d.result||('unused '+fmtBytes(item.unusedBytes)+' / raw save '+fmtBytes(item.rawSavingBytes)))+'</p></div><div class="fact"><h5>分类</h5><p>'+esc(d.classification||item.classification||'未分类')+'</p></div><div class="fact"><h5>为什么</h5><p>'+esc(d.why||'未提供')+'</p></div><div class="fact"><h5>风险</h5><p>'+esc(d.risk||'未标注')+'</p></div><div class="fact"><h5>怎么验证</h5><p>'+esc(d.validation||'未提供')+'</p></div></div><div class="section"><div class="section-head"><h3>证据</h3></div>'+evidenceHtml(d.evidence)+'</div>'+(links.length?'<div class="artifact-links">'+links.map(function(link){return '<a href="'+esc(safeHref(link.href||link.path||'#'))+'">'+esc(link.label||link.path||'artifact')+'</a>'}).join('')+'</div>':'')+'<div id="source-host"></div></div>';if(d.sourceId)await loadSource(d.sourceId,version);else if(d.code)mountSource({runId:core.runId,id:'inline',path:item.modulePath,source:d.code,ranges:[]});else $('#source-host').innerHTML='<div class="detail-empty">该条目没有源码分片。</div>'}catch(error){if(error.name==='AbortError')return;$('#selected-detail').innerHTML='<div class="error-state">'+esc(error.message)+(location.protocol==='file:'?'<br>大型报告请运行本地服务器。':'')+'</div>'}}
-async function loadSource(sourceId,version){var source=await loadShard('sources',sourceId,detailController.signal);if(version!==requestVersion)return;mountSource(source)}
+async function selectItem(id){var item=core.items.find(function(row){return row.id===id});if(!item)return;selectedId=id;history.replaceState(null,'','#item='+encodeURIComponent(id));renderList();requestVersion++;var version=requestVersion;if(detailController)detailController.abort();detailController=new AbortController();$('#selected-detail').innerHTML='<div class="loading">正在按需加载明细…</div>';try{var shard=await loadShard('details',item.shardKey,id,detailController.signal);if(version!==requestVersion)return;var d=shard.detail||{},links=Array.isArray(d.links)?d.links:[];$('#selected-detail').innerHTML='<div class="detail-header"><div><h4>'+esc(item.title)+'</h4><div class="detail-path">'+esc(item.modulePath)+'</div></div><span class="chip '+esc(item.status)+'">'+esc(stateLabel(item.status))+'</span></div><div class="detail-body"><div class="detail-grid"><div class="fact"><h5>结果</h5><p>'+esc(d.result||('unused '+fmtBytes(item.unusedBytes)+' / raw save '+fmtBytes(item.rawSavingBytes)))+'</p></div><div class="fact"><h5>分类</h5><p>'+esc(d.classification||item.classification||'未分类')+'</p></div><div class="fact"><h5>为什么</h5><p>'+esc(d.why||'未提供')+'</p></div><div class="fact"><h5>风险</h5><p>'+esc(d.risk||'未标注')+'</p></div><div class="fact"><h5>怎么验证</h5><p>'+esc(d.validation||'未提供')+'</p></div></div><div class="section"><div class="section-head"><h3>证据</h3></div>'+evidenceHtml(d.evidence)+'</div>'+(links.length?'<div class="artifact-links">'+links.map(function(link){return '<a href="'+esc(safeHref(link.href||link.path||'#'))+'">'+esc(link.label||link.path||'artifact')+'</a>'}).join('')+'</div>':'')+'<div id="source-host"></div></div>';if(d.sourceId)await loadSource(d.sourceId,version);else if(d.code)mountSource({runId:core.runId,id:'inline',path:item.modulePath,source:d.code,ranges:[]});else $('#source-host').innerHTML='<div class="detail-empty">该条目没有源码分片。</div>'}catch(error){if(error.name==='AbortError')return;$('#selected-detail').innerHTML='<div class="error-state">'+esc(error.message)+(location.protocol==='file:'?'<br>大型报告请运行本地服务器。':'')+'</div>'}}
+async function loadSource(sourceId,version){var shardKey=core.sourceShards&&core.sourceShards[sourceId];if(!shardKey)throw new Error('核心索引缺少源码分片映射：'+sourceId);var source=await loadShard('sources',shardKey,sourceId,detailController.signal);if(version!==requestVersion)return;mountSource(source)}
 function mountSource(source){sourceState={data:source,lines:String(source.source||'').split('\n')};sourceMatches=[];sourceMatchIndex=-1;var host=$('#source-host');host.innerHTML='<div class="code-panel"><div class="source-title">'+esc(source.path||source.id)+'</div>'+(source.quality&&source.quality.probablyMinified?'<div class="source-quality">源码疑似被压成极少长行；重新捕获可读的 loader 后源码后再作结论。</div>':'')+'<div class="code-toolbar"><input id="source-search" placeholder="搜索源码并跳转高亮…" aria-label="搜索源码"><label class="regex-toggle"><input id="source-regex" type="checkbox"> Regex</label><button id="source-prev" type="button">↑ 上一个</button><button id="source-next" type="button">↓ 下一个</button><span id="source-search-status" class="search-status"></span></div><div id="code-viewport" class="code-viewport" tabindex="0"><div id="code-spacer" class="code-spacer"></div></div></div>';$('#code-viewport').addEventListener('scroll',renderCode);$('#source-search').addEventListener('input',debounce(searchSource,170));$('#source-search').addEventListener('keydown',function(event){if(event.key==='Enter'){event.preventDefault();moveSourceMatch(event.shiftKey?-1:1)}});$('#source-prev').addEventListener('click',function(){moveSourceMatch(-1)});$('#source-next').addEventListener('click',function(){moveSourceMatch(1)});renderCode()}
 function unusedLine(line){return (sourceState.data.ranges||[]).some(function(range){var start=Number(range.startLine||range.start||0),end=Number(range.endLine||range.end||start);return (range.class==='unused'||range.status==='unused')&&line>=start&&line<=end})}
 function matchForLine(line){if(sourceMatchIndex<0)return null;var active=sourceMatches[sourceMatchIndex];return active&&active.line===line?active:null}
@@ -656,7 +753,7 @@ function htmlDocument(core, embeddedCore, embeddedShards) {
 <section class="section" id="measurement"><div class="section-head"><h3>数字说明</h3><span class="section-kicker">raw first / production comparable</span></div><div class="table-wrap"><table><thead><tr><th>术语</th><th>本次定义</th></tr></thead><tbody id="measurement-body"></tbody></table></div></section>
 <section class="section" id="optimizations"><div class="section-head"><h3>优化</h3><span class="section-kicker">actionable / sorted by confirmed raw</span></div><div class="table-wrap"><table><thead><tr><th>条目</th><th>状态</th><th>类别</th><th>RAW</th><th>GZIP</th><th>为什么</th><th>怎么验证</th></tr></thead><tbody id="optimizations-body"></tbody></table></div></section>
 <section class="section" id="experiments"><div class="section-head"><h3>实验项</h3><span class="section-kicker">diagnostic / rejected / completed-no-op</span></div><div class="table-wrap"><table><thead><tr><th>条目</th><th>状态</th><th>类别</th><th>RAW</th><th>GZIP</th><th>为什么</th><th>怎么验证</th></tr></thead><tbody id="experiments-body"></tbody></table></div></section>
-<section class="section" id="coverage"><div class="section-head"><h3>十项检查覆盖</h3><span class="section-kicker">fresh artifact required</span></div><div class="table-wrap"><table><thead><tr><th>检查</th><th>状态</th><th>结论</th><th>证据</th><th>命令 / 阻塞</th></tr></thead><tbody id="checks-body"></tbody></table></div></section>
+<section class="section" id="coverage"><div class="section-head"><h3>十项检查覆盖</h3><span class="section-kicker">fresh artifact + terminal candidate coverage required</span></div><div class="table-wrap"><table><thead><tr><th>检查</th><th>状态</th><th>结论</th><th>候选覆盖</th><th>证据</th><th>命令 / 阻塞</th></tr></thead><tbody id="checks-body"></tbody></table></div></section>
 <section class="section" id="ecma-attribution" hidden><div class="section-head"><h3>提高 ECMA 等级：体积下降归因</h3><span class="section-kicker">先看模块是否消失，再展开 loader 与产物证据</span></div><div id="ecma-attribution-body"></div></section>
 <section class="section" id="analyses"><div class="section-head"><h3>相关分析页面</h3><span class="section-kicker">generated or explicitly missing</span></div><div id="analysis-links" class="link-grid"></div></section>
 <section class="section" id="selection"><div class="section-head"><h3>选中项与源码</h3><span class="section-kicker">lazy detail / visible lines only</span></div><div id="selected-detail" class="detail-shell"><div class="detail-empty">从左侧选择一个条目。</div></div></section>
@@ -672,6 +769,10 @@ function renderReport({ inputPath, outDir, title, forceServer = false }) {
   const dataDir = resolve(outDir, 'data');
   const detailDir = resolve(dataDir, 'details');
   const sourceDir = resolve(dataDir, 'sources');
+  // Clear only renderer-owned shard directories. Other files under data/ may
+  // belong to adjacent report tooling and must not be removed.
+  rmSync(detailDir, { recursive: true, force: true });
+  rmSync(sourceDir, { recursive: true, force: true });
   mkdirSync(detailDir, { recursive: true });
   mkdirSync(sourceDir, { recursive: true });
 
@@ -681,8 +782,8 @@ function renderReport({ inputPath, outDir, title, forceServer = false }) {
     const shard = { version: 1, runId: normalized.runId, id: item.id, detail: item.detail };
     const json = JSON.stringify(shard);
     shardBytes += Buffer.byteLength(json);
-    writeFileSync(resolve(detailDir, `${item.id}.json`), json + '\n');
-    embeddedShards[`details/${item.id}`] = shard;
+    writeFileSync(resolve(detailDir, `${item.shardKey}.json`), json + '\n');
+    embeddedShards[`details/${item.shardKey}`] = shard;
   }
   let sourceBytes = 0;
   for (const source of normalized.sources) {
@@ -690,8 +791,8 @@ function renderReport({ inputPath, outDir, title, forceServer = false }) {
     const json = JSON.stringify(shard);
     sourceBytes += Buffer.byteLength(source.source);
     shardBytes += Buffer.byteLength(json);
-    writeFileSync(resolve(sourceDir, `${source.id}.json`), json + '\n');
-    embeddedShards[`sources/${source.id}`] = shard;
+    writeFileSync(resolve(sourceDir, `${source.shardKey}.json`), json + '\n');
+    embeddedShards[`sources/${source.shardKey}`] = shard;
   }
 
   const core = {
@@ -705,6 +806,7 @@ function renderReport({ inputPath, outDir, title, forceServer = false }) {
     overallStatus: normalized.overallStatus,
     privacy: normalized.privacy,
     items: normalized.items.map(({ detail, ...item }) => item),
+    sourceShards: Object.fromEntries(normalized.sources.map((source) => [source.id, source.shardKey])),
     optimizations: normalized.optimizations,
     ecmaAttribution: normalized.ecmaAttribution,
     analyses: normalized.analyses,
@@ -876,7 +978,9 @@ function finalizeReadabilityReview({ outDir, reviewPath }) {
       if (notApplicable(fields.sourceMatchLocation)) throw new Error('sourceMatchLocation cannot be not-applicable when sourceQuery is present');
       const sourceLocation = /^([^:]+):(\d+)(?::(\d+))?$/.exec(fields.sourceMatchLocation);
       if (!sourceLocation) throw new Error('sourceMatchLocation must use SOURCE_ID:LINE or SOURCE_ID:LINE:COLUMN');
-      const sourceFile = resolve(root, 'data', 'sources', `${sourceLocation[1]}.json`);
+      const sourceShardKey = core.sourceShards?.[sourceLocation[1]];
+      if (!sourceShardKey) throw new Error('sourceMatchLocation source ID has no shard mapping');
+      const sourceFile = resolve(root, 'data', 'sources', `${sourceShardKey}.json`);
       if (!existsSync(sourceFile)) throw new Error('sourceMatchLocation source ID does not exist');
       const source = JSON.parse(readFileSync(sourceFile, 'utf8'));
       const sourceLine = String(source.source || '').split('\n')[Number(sourceLocation[2]) - 1];
@@ -929,13 +1033,23 @@ function selfTest() {
     // cannot see syntax mistakes inside the String.raw payload.
     new Function(CLIENT_JS);
     const inputPath = resolve(root, 'input.json');
-    const checks = CHECKS.map(([id]) => ({ id, state: 'completed-no-op', result: 'fixture proof', evidence: `${id}.json` }));
+    const zeroCoverage = { discovered: 0, terminal: 0, unresolved: 0, applied: 0, riskFound: 0 };
+    const checks = CHECKS.map(([id]) => ({
+      id,
+      state: 'completed-no-op',
+      result: 'fixture proof',
+      evidence: `${id}.json`,
+      coverage: { ...zeroCoverage },
+    }));
     const fixture = {
       runId: 'fixture-run',
       title: 'Fixture Bundle Report',
       summary: { headline: '0 B confirmed', confirmedRawSavingBytes: 0 },
       checks,
-      modules: [{ id: 'module-a', path: 'src/a.js', unusedBytes: 120, sourceId: 'source-a', reason: 'fixture' }],
+      modules: [
+        { id: 'module-a', path: 'src/a.js', unusedBytes: 120, sourceId: 'source-a', reason: 'fixture' },
+        { id: 'nested/unsafe-module', path: 'src/nested.js', unusedBytes: 0, sourceId: 'nested/unsafe-source', reason: 'safe shard fixture' },
+      ],
       optimizations: [
         {
           id: 'optimization-a',
@@ -1010,7 +1124,10 @@ function selfTest() {
         failureLedger: [{ analysis: 'module diff', status: 'recovered', command: 'node ecma-module-diff.cjs', error: 'fixture RangeError', resolution: 'stream arrays', result: 'rerun succeeded' }],
         artifacts: ['ecma-attribution.json'],
       },
-      sources: [{ id: 'source-a', path: 'src/a.js', source: 'export const a = 1;\n', ranges: [{ startLine: 1, endLine: 1, status: 'unused' }] }],
+      sources: [
+        { id: 'source-a', path: 'src/a.js', source: 'export const a = 1;\n', ranges: [{ startLine: 1, endLine: 1, status: 'unused' }] },
+        { id: 'nested/unsafe-source', path: 'src/nested.js', source: 'export const nested = 1;\n', ranges: [] },
+      ],
     };
     writeFileSync(inputPath, JSON.stringify(fixture));
 
@@ -1054,7 +1171,7 @@ function selfTest() {
     assert(legacyEcma.overallStatus === 'complete'
       && legacyEcma.ecmaAttribution.removedBreakdown.apiPolyfillCount === null,
     'legacy ECMA schema should remain valid while omitted category counts stay unknown');
-    assert(normalized.items.length === 2, 'each optimization should have exactly one detail item');
+    assert(normalized.items.length === 3, 'each optimization and standalone module should have exactly one detail item');
     const merged = normalized.items.find((item) => item.id === 'module-a');
     assert(merged.status === 'unquantified' && merged.classification === 'export-root-cause', 'optimization status and classification should reach its detail item');
     assert(merged.detail.risk.includes('runtime export access') && merged.detail.evidence.includes('export-usage.json'), 'optimization risk and evidence should survive detail merge');
@@ -1065,10 +1182,12 @@ function selfTest() {
       id: 'baseline',
       state: 'blocked',
       result: 'failed',
+      evidence: 'build-failure.log',
       attemptedCommand: 'pnpm build',
       error: 'exit 1: fixture',
       missingPrerequisite: 'BUILD_TOKEN',
       nextCommand: 'BUILD_TOKEN=x pnpm build',
+      coverage: { discovered: 1, terminal: 0, unresolved: 1, applied: 0, riskFound: 0 },
     }])[0];
     assert(preservedBlocked.attemptedCommand === 'pnpm build'
       && preservedBlocked.error === 'exit 1: fixture'
@@ -1076,6 +1195,26 @@ function selfTest() {
       && preservedBlocked.nextCommand === 'BUILD_TOKEN=x pnpm build', 'blocked check should retain all four failure fields');
     const unsupportedNoOp = normalizeChecks([{ id: 'baseline', state: 'completed-no-op', result: 'nothing found' }])[0];
     assert(unsupportedNoOp.state === 'blocked' && /fresh evidence/.test(unsupportedNoOp.error), 'completed-no-op without evidence should be blocked');
+    const emptyEvidenceNoOp = normalizeChecks([{
+      id: 'baseline',
+      state: 'completed-no-op',
+      result: 'nothing found',
+      evidence: [null, '', {}],
+      coverage: { ...zeroCoverage },
+    }])[0];
+    assert(emptyEvidenceNoOp.state === 'blocked' && /fresh evidence/.test(emptyEvidenceNoOp.error), 'structurally non-empty but content-free evidence should be blocked');
+    const incompleteCoverage = normalizeChecks([{
+      id: 'baseline',
+      state: 'completed',
+      result: 'one candidate remains',
+      evidence: 'baseline.json',
+      coverage: { discovered: 1, terminal: 0, unresolved: 1, applied: 0, riskFound: 0 },
+    }])[0];
+    assert(incompleteCoverage.state === 'blocked' && /unresolved/.test(incompleteCoverage.error), 'nonterminal candidate coverage should block completion');
+    const duplicateIds = { ...fixture, modules: [...fixture.modules, { id: 'module-a', path: 'src/duplicate.js' }] };
+    let duplicateRejected = false;
+    try { normalizeReport(duplicateIds); } catch (error) { duplicateRejected = /Duplicate detail item id/.test(error.message); }
+    assert(duplicateRejected, 'duplicate logical ids should be rejected before shard emission');
 
     const materialWithoutAttribution = normalizeReport({
       runId: 'material-missing-attribution',
@@ -1087,7 +1226,9 @@ function selfTest() {
     const result = renderReport({ inputPath, outDir: resolve(root, 'report') });
     const html = readFileSync(result.htmlPath, 'utf8');
     const reportJs = readFileSync(resolve(root, 'report', 'report.js'), 'utf8');
-    const detail = JSON.parse(readFileSync(resolve(root, 'report', 'data', 'details', 'module-a.json'), 'utf8'));
+    const core = JSON.parse(readFileSync(resolve(root, 'report', 'report-core.json'), 'utf8'));
+    const moduleAItem = core.items.find((item) => item.id === 'module-a');
+    const detail = JSON.parse(readFileSync(resolve(root, 'report', 'data', 'details', `${moduleAItem.shardKey}.json`), 'utf8'));
     assert(html.includes('module-search') && html.includes('selected-detail') && html.includes('experiments-body') && html.includes('ecma-attribution-body'), 'HTML should contain search, detail, experiment, and ECMA sections');
     assert(reportJs.includes("'unquantified':'待量化'") && reportJs.includes("'rejected':'已拒绝'"), 'Chinese status labels should be emitted');
     assert(reportJs.includes('移除 API polyfill')
@@ -1096,7 +1237,13 @@ function selfTest() {
       && reportJs.includes('失败与重试记录'),
     'ECMA report should lead with direct category answers and expose complete evidence drill-downs');
     assert(detail.detail.risk.includes('runtime export access') && detail.detail.classification === 'export-root-cause', 'detail shard should retain optimization review fields');
-    assert(existsSync(resolve(root, 'report', 'data', 'sources', 'source-a.json')), 'source shard should be emitted');
+    const sourceAShard = core.sourceShards['source-a'];
+    const nestedSourceShard = core.sourceShards['nested/unsafe-source'];
+    const nestedItem = core.items.find((item) => item.id === 'nested/unsafe-module');
+    assert(sourceAShard && existsSync(resolve(root, 'report', 'data', 'sources', `${sourceAShard}.json`)), 'source shard should be emitted through its safe key');
+    assert(nestedSourceShard && !nestedSourceShard.includes('/') && existsSync(resolve(root, 'report', 'data', 'sources', `${nestedSourceShard}.json`)), 'path-like source ids must map to flat safe shard names');
+    assert(nestedItem?.shardKey && !nestedItem.shardKey.includes('/') && existsSync(resolve(root, 'report', 'data', 'details', `${nestedItem.shardKey}.json`)), 'path-like detail ids must map to flat safe shard names');
+    assert(!existsSync(resolve(root, 'report', 'data', 'sources', 'nested')), 'logical ids must never create nested shard paths');
 
     const manifestPath = resolve(root, 'report', 'report-manifest.json');
     let manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

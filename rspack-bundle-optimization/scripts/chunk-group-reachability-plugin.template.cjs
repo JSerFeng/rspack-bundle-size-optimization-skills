@@ -75,6 +75,36 @@ function getOutgoingModules(moduleGraph, module) {
   return targets;
 }
 
+function summarizeChunkGroup(compilation, chunkGraph, chunkModulesMap, chunkGroup) {
+  let groupTotalJSSize = 0;
+  let groupEmittedJSSize = 0;
+  const chunks = [];
+  const chunkFiles = [];
+  for (const chunk of chunkGroup.chunks || []) {
+    chunks.push(chunk.name || chunk.id || 'unnamed');
+    for (const module of chunkModulesMap.get(chunk) || []) {
+      groupTotalJSSize += getModuleSizeRobust(chunkGraph, module);
+    }
+    for (const file of chunk.files || []) {
+      if (!file.endsWith('.js')) continue;
+      const asset = compilation.assets?.[file];
+      if (!asset) continue;
+      const assetSize = typeof asset.size === 'function' ? asset.size() : 0;
+      groupEmittedJSSize += assetSize;
+      const modules = [...(chunkModulesMap.get(chunk) || [])]
+        .map((module) => ({
+          name: getModuleName(compilation, module),
+          size: getModuleSizeRobust(chunkGraph, module),
+        }))
+        .sort((a, b) => b.size - a.size);
+      // Keep the backing JSON exhaustive. Presentation layers may rank or
+      // truncate this list, but the automation ledger must see every row.
+      chunkFiles.push({ file, size: assetSize, modules });
+    }
+  }
+  return { chunks, chunkFiles, groupEmittedJSSize, groupTotalJSSize };
+}
+
 function analyzeChunkGroupReachability(compilation, compilerContext) {
   const chunkGraph = compilation.chunkGraph;
   const moduleGraph = compilation.moduleGraph;
@@ -109,42 +139,88 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
     const actualModules = getGroupModules(chunkGroup);
     if (actualModules.size === 0) continue;
 
+    const groupSummary = summarizeChunkGroup(
+      compilation,
+      chunkGraph,
+      chunkModulesMap,
+      chunkGroup,
+    );
+
     const rootModules = new Set();
+    const rootDiscovery = { strategiesTried: [], selectedStrategies: [] };
+    const recordRootStrategy = (strategy, collect) => {
+      const before = rootModules.size;
+      collect();
+      const addedRootModules = rootModules.size - before;
+      rootDiscovery.strategiesTried.push({ strategy, addedRootModules });
+      if (addedRootModules > 0) rootDiscovery.selectedStrategies.push(strategy);
+    };
 
     if (chunkGroup.isInitial && chunkGroup.isInitial()) {
-      for (const chunk of chunkGroup.chunks || []) {
-        for (const m of safeInvoke(() => chunkGraph.getChunkEntryModulesIterable(chunk)) || []) {
-          rootModules.add(m);
+      recordRootStrategy('initial-chunk-entry-modules', () => {
+        for (const chunk of chunkGroup.chunks || []) {
+          for (const m of safeInvoke(() => chunkGraph.getChunkEntryModulesIterable(chunk)) || []) {
+            rootModules.add(m);
+          }
         }
-      }
+      });
     } else {
-      for (const origin of chunkGroup.origins || []) {
-        if (origin.dependency) {
+      const resolvedDependencyOrigins = new Set();
+      recordRootStrategy('async-origin-dependencies', () => {
+        for (const origin of chunkGroup.origins || []) {
+          if (!origin.dependency) continue;
           const targetModule = safeInvoke(() => moduleGraph.getModule(origin.dependency));
-          if (targetModule) { rootModules.add(targetModule); continue; }
+          if (targetModule) {
+            rootModules.add(targetModule);
+            resolvedDependencyOrigins.add(origin);
+          }
         }
-        if (origin.module) {
-          const blocks = safeInvoke(() => origin.module.blocks) || [];
-          for (const block of blocks) {
-            for (const dep of block.dependencies || []) {
-              const targetModule = safeInvoke(() => moduleGraph.getModule(dep));
+      });
+      recordRootStrategy('async-origin-block-dependencies', () => {
+        for (const origin of chunkGroup.origins || []) {
+          if (resolvedDependencyOrigins.has(origin) || !origin.module) continue;
+          for (const block of safeInvoke(() => origin.module.blocks) || []) {
+            for (const dependency of block.dependencies || []) {
+              const targetModule = safeInvoke(() => moduleGraph.getModule(dependency));
               if (targetModule && actualModules.has(targetModule)) {
                 rootModules.add(targetModule);
               }
             }
           }
         }
-      }
+      });
       if (rootModules.size === 0) {
-        for (const chunk of chunkGroup.chunks || []) {
-          for (const m of safeInvoke(() => chunkGraph.getChunkEntryModulesIterable(chunk)) || []) {
-            rootModules.add(m);
+        recordRootStrategy('async-chunk-entry-module-fallback', () => {
+          for (const chunk of chunkGroup.chunks || []) {
+            for (const m of safeInvoke(() => chunkGraph.getChunkEntryModulesIterable(chunk)) || []) {
+              rootModules.add(m);
+            }
           }
-        }
+        });
       }
     }
 
-    if (rootModules.size === 0) continue;
+    if (rootModules.size === 0) {
+      results.push({
+        groupName,
+        isAsync,
+        ...groupSummary,
+        actualModuleCount: actualModules.size,
+        rootModuleCount: 0,
+        reachableModuleCount: null,
+        removableJSModuleCount: null,
+        removableJSSize: null,
+        nonJSResidualCount: null,
+        removableJSModules: [],
+        analysisStatus: 'blocked',
+        rootDiscovery,
+        dataQuality: [{
+          type: 'missing-root-modules',
+          message: 'No root module was found after every applicable root-discovery strategy; reachability and removable-module conclusions are unavailable.',
+        }],
+      });
+      continue;
+    }
 
     const visited = new Set();
     const queue = [...rootModules];
@@ -162,38 +238,6 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
     const reachableModules = new Set();
     for (const m of actualModules) {
       if (visited.has(m)) reachableModules.add(m);
-    }
-
-    let groupTotalJSSize = 0;       // source-level (module sizes)
-    let groupEmittedJSSize = 0;     // emitted (minified) JS asset sizes
-    const groupChunkNames = [];
-    const groupChunkFiles = [];
-    for (const chunk of chunkGroup.chunks || []) {
-      groupChunkNames.push(chunk.name || chunk.id || 'unnamed');
-      for (const m of chunkModulesMap.get(chunk) || []) {
-        groupTotalJSSize += getModuleSizeRobust(chunkGraph, m);
-      }
-      // Sum emitted JS file sizes from compilation.assets
-      const chunkModuleList = [];
-      for (const file of chunk.files || []) {
-        if (!file.endsWith('.js')) continue;
-        const asset = compilation.assets[file];
-        if (asset) {
-          const assetSize = typeof asset.size === 'function' ? asset.size() : 0;
-          groupEmittedJSSize += assetSize;
-          // Collect modules in this chunk for per-chunk detail
-          for (const m of chunkModulesMap.get(chunk) || []) {
-            chunkModuleList.push({
-              name: getModuleName(compilation, m),
-              size: getModuleSizeRobust(chunkGraph, m),
-            });
-          }
-          chunkModuleList.sort((a, b) => b.size - a.size);
-          // Keep the backing JSON exhaustive. Presentation layers may rank or
-          // truncate this list, but the automation ledger must see every row.
-          groupChunkFiles.push({ file, size: assetSize, modules: chunkModuleList });
-        }
-      }
     }
 
     const removableJSModules = [];
@@ -222,10 +266,7 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
     results.push({
       groupName,
       isAsync,
-      chunks: groupChunkNames,
-      chunkFiles: groupChunkFiles,
-      groupEmittedJSSize,
-      groupTotalJSSize,
+      ...groupSummary,
       actualModuleCount: actualModules.size,
       rootModuleCount: rootModules.size,
       reachableModuleCount: reachableModules.size,
@@ -233,6 +274,9 @@ function analyzeChunkGroupReachability(compilation, compilerContext) {
       removableJSSize,
       nonJSResidualCount,
       removableJSModules: removableJSModules.sort((a, b) => b.size - a.size),
+      analysisStatus: removableJSModules.length > 0 ? 'review-required' : 'completed-no-op',
+      rootDiscovery,
+      dataQuality: [],
     });
   }
 
@@ -744,11 +788,15 @@ class ChunkGroupReachabilityPlugin {
       const asyncGroups = Array.isArray(results) ? results.filter((g) => g.isAsync) : [];
       const removableGroups = asyncGroups.filter((g) => g.removableJSModuleCount > 0);
       const totalRemovable = removableGroups.reduce((s, g) => s + g.removableJSSize, 0);
+      const analysisFailures = Array.isArray(results)
+        ? results.filter((group) => group.analysisStatus === 'blocked')
+        : [{ dataQuality: [{ message: results.error || 'reachability analysis failed' }] }];
 
-      console.log(`[ChunkGroupReachability] ${results.length} groups, ${removableGroups.length} with removable modules (${totalRemovable} B)`);
+      console.log(`[ChunkGroupReachability] ${Array.isArray(results) ? results.length : 0} groups, ${removableGroups.length} with removable modules (${totalRemovable} B)`);
       console.log(`[ChunkGroupReachability] Written to ${outPath}`);
 
       // --- Chunk graph visualization ---
+      let graphFailure = null;
       try {
         const graphData = buildChunkGraphData(compilation, compilerContext);
         const graphJsonPath = resolve(outDir, 'chunk-graph.json');
@@ -760,10 +808,60 @@ class ChunkGroupReachabilityPlugin {
         console.log(`[ChunkGroupReachability] Chunk graph: ${graphData.nodes.length} groups, ${graphData.edges.length} edges`);
         console.log(`[ChunkGroupReachability] Graph visualization written to ${htmlPath}`);
       } catch (err) {
-        console.warn(`[ChunkGroupReachability] Failed to generate chunk graph: ${err.message}`);
+        graphFailure = err;
+      }
+
+      if (analysisFailures.length > 0 || graphFailure) {
+        const reasons = [
+          analysisFailures.length > 0
+            ? `${analysisFailures.length} chunk group(s) have incomplete root discovery`
+            : null,
+          graphFailure ? `chunk graph generation failed: ${graphFailure.message}` : null,
+        ].filter(Boolean);
+        throw new Error(`[ChunkGroupReachability] incomplete: ${reasons.join('; ')}; inspect ${outPath}`);
       }
     });
   }
 }
 
-module.exports = { ChunkGroupReachabilityPlugin, analyzeChunkGroupReachability, buildChunkGraphData, generateChunkGraphHTML };
+function selfTest() {
+  const module = {
+    resource: '/project/src/async.js',
+    identifier: () => '/project/src/async.js',
+    size: () => 42,
+  };
+  const chunk = { id: 'async', name: 'async', files: new Set() };
+  const group = { name: 'async', chunks: [chunk], origins: [], isInitial: () => false };
+  const makeCompilation = (entryModules) => ({
+    assets: {},
+    chunks: [chunk],
+    chunkGroups: [group],
+    chunkGraph: {
+      getChunkModulesIterable: () => [module],
+      getChunkEntryModulesIterable: () => entryModules,
+      getModuleSize: () => 42,
+    },
+    moduleGraph: {
+      getModule: () => null,
+      getOutgoingConnections: () => [],
+    },
+  });
+
+  const blocked = analyzeChunkGroupReachability(makeCompilation([]), '/project');
+  if (blocked.length !== 1 || blocked[0].analysisStatus !== 'blocked') {
+    throw new Error('rootless chunk group must be persisted as blocked');
+  }
+  if (blocked[0].removableJSModuleCount !== null || blocked[0].dataQuality.length === 0) {
+    throw new Error('rootless chunk group must not report a zero-impact conclusion');
+  }
+
+  const complete = analyzeChunkGroupReachability(makeCompilation([module]), '/project');
+  if (complete.length !== 1 || complete[0].analysisStatus !== 'completed-no-op') {
+    throw new Error('entry-module fallback should complete the reachable case');
+  }
+  console.log('chunk-group-reachability-plugin self-test passed');
+}
+
+if (require.main === module && process.argv.includes('--self-test')) selfTest();
+
+module.exports = { ChunkGroupReachabilityPlugin, analyzeChunkGroupReachability, buildChunkGraphData, generateChunkGraphHTML, summarizeChunkGroup };

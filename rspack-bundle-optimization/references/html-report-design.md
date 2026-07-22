@@ -23,7 +23,7 @@ finished report.
 
 ## Renderer Input Contract
 
-Normalize fresh artifacts into one JSON object before rendering. At minimum provide:
+Validate the run's `candidate-ledger.json`, then normalize fresh artifacts into one JSON object before rendering. The check coverage below must be derived from the validated ledger, not retyped from memory. At minimum provide:
 
 ```json
 {
@@ -46,6 +46,13 @@ Normalize fresh artifacts into one JSON object before rendering. At minimum prov
       "state": "blocked",
       "result": "...",
       "evidence": "...",
+      "coverage": {
+        "discovered": 0,
+        "terminal": 0,
+        "unresolved": 0,
+        "applied": 0,
+        "riskFound": 0
+      },
       "attemptedCommand": "...",
       "error": "exact stderr/exception",
       "missingPrerequisite": "...",
@@ -74,9 +81,9 @@ Normalize fresh artifacts into one JSON object before rendering. At minimum prov
 
 All ten check ids are required: `baseline`, `reachability`, `retained-unused`, `side-effects`, `export-usage`, `rollup-diff`, `cjs2esm`, `splitchunks`, `ecma`, and `post-loader`. A missing or invalid row is rendered as `blocked`, not silently omitted.
 
-`completed-no-op` requires a fresh non-empty `evidence`/`artifact`; the renderer converts an unsupported no-op claim to `blocked`. A blocked row keeps `attemptedCommand`, exact `error`, `missingPrerequisite`, and `nextCommand` as four separate visible fields. Do not collapse them into one command/error cell in normalized data.
+Every row requires a fresh non-empty `evidence`/`artifact`, a non-empty result, and non-negative integer candidate coverage: `discovered`, `terminal`, `unresolved`, `applied`, and `riskFound`, where `unresolved = discovered - terminal`. `completed` and `completed-no-op` additionally require zero unresolved candidates; the renderer converts an unsupported completion claim to `blocked`. A blocked row keeps `attemptedCommand`, exact `error`, `missingPrerequisite`, and `nextCommand` as four separate visible fields. Do not collapse them into one command/error cell in normalized data.
 
-Each module may reference `sourceId`; each source supplies `id`, `path`, readable `source` or `sourceFile`, source-quality metadata, and optional unused/highlight ranges. Each optimization includes status/classification, raw and gzip savings, reason, risk, evidence, and validation command. Use `detailItemId` to bind it to an existing module/detail row. If no matching item exists, the renderer creates one, so every optimization remains selectable even when `modules` is non-empty. Use `group: "optimization"` for actionable work and `group: "experiment"` for diagnostic/rejected/no-op work; absent groups are inferred. Supported visible statuses include `confirmed`, `candidate`, `unquantified`, `diagnostic`, `rejected`, and `completed-no-op`.
+Each module may reference `sourceId`; each source supplies a unique logical `id`, `path`, readable `source` or `sourceFile`, source-quality metadata, and optional unused/highlight ranges. Logical IDs may contain path-like characters, but they are never filenames: the renderer rejects duplicate IDs and maps each ID to a deterministic flat shard key. Each optimization includes status/classification, raw and gzip savings, reason, risk, evidence, and validation command. Use `detailItemId` to bind it to an existing module/detail row. If no matching item exists, the renderer creates one, so every optimization remains selectable even when `modules` is non-empty. Use `group: "optimization"` for actionable work and `group: "experiment"` for diagnostic/rejected/no-op work; absent groups are inferred. Supported visible statuses include `confirmed`, `candidate`, `unquantified`, `diagnostic`, `rejected`, and `completed-no-op`.
 
 For a material ECMA change, provide `ecmaAttribution` with `baselineModuleCount`, `experimentModuleCount`, inventory-derived `addedModules`/`removedModules`, source-map-derived `retainedShrunkSources`/`retainedGrownSources`, `topGeneratedByteContributors`, `postLoaderSourceDiffConclusion`, `rootCause`, `mappedBytes`, `unmappedBytes`, and non-empty `artifacts`. Materiality is inferred from the absolute `appJsRawDeltaBytes`/`rawDeltaBytes` (legacy `*ReductionBytes` is accepted), the baseline byte count, or an unexpected graph/helper/polyfill flag; a material win or regression with missing structured fields forces the `ecma` check to `blocked`. `retained*Sources` are source-level attribution. Show a corresponding module and confidence only when `joinKind` is `one-to-one`; never infer added/removed modules from source-map absence.
 
@@ -221,7 +228,8 @@ Use this structure for the top-level HTML:
 6. **Mandatory coverage matrix**
    - Show every skill check: production baseline plus resolved optimization config, reachability, retained unused, side effects, export usage roots, Rollup diff, CJS-to-ESM, splitChunks, ECMA level, and post-loader source quality.
    - Use only `completed`, `completed-no-op`, or `blocked` as execution states.
-   - Show one fresh artifact or evidence statement and one result summary per row.
+   - Show one fresh artifact or evidence statement, one result summary, and candidate coverage (`discovered / terminal / unresolved / applied / risk-found`) per row.
+   - A completed row must have `terminal = discovered` and `unresolved = 0`; a capture or sampled list is not completion.
    - A blocked row must show the attempted command, exact failure, missing prerequisite, and next command. A no-op row must prove why no experiment was useful.
 
 7. **Related analysis pages**
@@ -291,7 +299,7 @@ Treat report responsiveness as part of correctness. A source viewer that freezes
 - Keep the initial core index below 2 MB uncompressed and below 2,000 list rows when embedding it in the HTML. Keep all embedded detail/source shards together below 2 MB and total embedded source below 5 MB.
 - If any threshold is exceeded, generate a small boot page plus `report-core.json` and per-item/per-source shards, then use `scripts/serve-bundle-report.cjs` on `127.0.0.1`. Do not make a large `file://` page parse one giant JSON/script payload.
 - Small reports may embed their complete shards for a true offline `file://` fallback. Large reports must show the exact local-server command when opened through `file://`.
-- Full source, export chains, and optimization evidence load only after selection. Check each shard's `runId` against the core index and reject stale or mixed-run data.
+- Full source, export chains, and optimization evidence load only after selection. Use the core index's logical-id-to-safe-shard mapping rather than interpolating logical IDs into paths. Check each shard's `runId` and logical `id` against the core index and reject stale, mixed-run, or mismatched data.
 - Cap the client cache, for example with a 16 MB LRU, and abort an in-flight detail/source request when selection changes. Avoid unbounded `Promise.all` over source shards.
 
 ### Virtual rendering
@@ -458,7 +466,7 @@ Before delivering an HTML report:
 6. Confirm every diagnostic or candidate result says why it is not counted.
 7. Confirm "Related analysis pages" links exist or are explicitly marked `未生成`.
 8. Search for unexplained terms such as `sideEffects`, `concatenateModules`, `usedExports`, `root`, `chunk`, `ECMA`, and define or replace them in visible text.
-9. Confirm the coverage matrix contains all ten mandatory checks, including the resolved optimization-config evidence in the baseline row, and every row is `completed`, `completed-no-op`, or `blocked` with evidence.
+9. Confirm the coverage matrix contains all ten mandatory checks, including the resolved optimization-config evidence in the baseline row, and every row is `completed`, `completed-no-op`, or `blocked` with evidence, a result, and internally consistent candidate coverage.
 10. Exercise overview search, every sort control, card anchors, collapsible sections, drill-down selection, and source highlighting; fix console errors before delivery.
 11. Capture or inspect both a desktop viewport and a narrow/mobile viewport, checking overflow, sticky navigation, table scrolling, code wrapping, and focus visibility.
 12. Test a source query end to end: select its module, wait for the shard, jump to the result, and confirm the exact columns are red-highlighted; then switch selection during a slow load and confirm stale data never appears.

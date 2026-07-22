@@ -87,10 +87,69 @@ function normalizeRawEdge(edge) {
   };
 }
 
+function validateRawCapture(raw) {
+  if (!raw || typeof raw !== 'object') throw new Error('export-usage capture must be a JSON object');
+  if (raw.schemaVersion !== 1 || raw.kind !== 'rspack-export-usage-capture') {
+    throw new Error('export-usage capture has an unsupported or missing schema');
+  }
+  if (raw.complete !== true) throw new Error('export-usage capture is not marked complete');
+  if (typeof raw.generatedAt !== 'string' || !Number.isFinite(Date.parse(raw.generatedAt))) {
+    throw new Error('export-usage capture is missing a valid generatedAt timestamp');
+  }
+  if (typeof raw.runId !== 'string' || !raw.runId.trim()) throw new Error('export-usage capture is missing runId');
+  if (typeof raw.compilerId !== 'string' || !raw.compilerId.trim()) throw new Error('export-usage capture is missing compilerId');
+  if (!Array.isArray(raw.modules) || !Array.isArray(raw.edges)) throw new Error('export-usage capture must contain modules and edges arrays');
+  if (raw.moduleCount !== raw.modules.length || raw.edgeCount !== raw.edges.length) {
+    throw new Error('export-usage capture counts do not match its arrays');
+  }
+  const moduleKeys = new Set();
+  for (const module of raw.modules) {
+    if (module?.ukey === null || module?.ukey === undefined || typeof module?.path !== 'string' || !module.path) {
+      throw new Error('export-usage capture contains a module without ukey or path');
+    }
+    if (moduleKeys.has(module.ukey)) throw new Error(`export-usage capture contains duplicate module ukey ${module.ukey}`);
+    moduleKeys.add(module.ukey);
+  }
+  for (const edge of raw.edges) {
+    const normalized = normalizeRawEdge(edge);
+    if (normalized.originUkey === null || normalized.originUkey === undefined || normalized.targetUkey === null || normalized.targetUkey === undefined) {
+      throw new Error('export-usage capture contains an edge without origin or target');
+    }
+    if (!moduleKeys.has(normalized.originUkey) || !moduleKeys.has(normalized.targetUkey)) {
+      throw new Error('export-usage capture contains an edge whose module is absent from the module inventory');
+    }
+  }
+  return raw;
+}
+
+function collectUsedExports(edges) {
+  const usedExports = new Map();
+  const namespaceOnlyTargets = new Set();
+  const addUsedExport = (ukey, exportName) => {
+    if (!usedExports.has(ukey)) usedExports.set(ukey, new Set());
+    usedExports.get(ukey).add(exportName);
+  };
+  for (const edge of edges) {
+    const targetExports = edge.targetExports;
+    if (targetExports && targetExports.length) {
+      for (const exportName of targetExports) addUsedExport(edge.targetUkey, exportName);
+    } else {
+      namespaceOnlyTargets.add(edge.targetUkey);
+    }
+  }
+  for (const targetUkey of namespaceOnlyTargets) {
+    if (!usedExports.has(targetUkey) || usedExports.get(targetUkey).size === 0) {
+      addUsedExport(targetUkey, '*');
+    }
+  }
+  return usedExports;
+}
+
 function main() {
-  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  if (args['self-test']) return selfTest();
+  const raw = validateRawCapture(JSON.parse(readFileSync(rawPath, 'utf8')));
   const modules = raw.modules || [];
-  const edges = (raw.edges || []).map(normalizeRawEdge).filter((edge) => edge.originUkey != null && edge.targetUkey != null);
+  const edges = raw.edges.map(normalizeRawEdge);
 
   // ukey -> module
   const modByUkey = new Map();
@@ -105,24 +164,10 @@ function main() {
     incomingByTarget.get(tU).push(e);
   }
 
-  // enumerate concrete used exports: (tU, e) for every edge whose targetExports != null
-  const usedExports = new Set(); // key `${tU}\n${exp}`
-  const namespaceOnlyTargets = new Set();
-  for (const e of edges) {
-    const tU = e.targetUkey;
-    const tExports = e.targetExports;
-    if (tExports && tExports.length) {
-      for (const ex of tExports) usedExports.add(`${tU}\n${ex}`);
-    } else {
-      namespaceOnlyTargets.add(tU);
-    }
-  }
-  // For namespace-only providers with no concrete export usage, emit a '*' record.
-  for (const tU of namespaceOnlyTargets) {
-    let hasConcrete = false;
-    for (const k of usedExports) { if (k.startsWith(`${tU}\n`)) { hasConcrete = true; break; } }
-    if (!hasConcrete) usedExports.add(`${tU}\n*`);
-  }
+  // Preserve the original module-key type. Serializing a ukey and export name
+  // into one delimiter-based string can silently drop valid string keys or
+  // misparse an export name containing a newline.
+  const usedExports = collectUsedExports(edges);
 
   // Whole-module provider consumption is the root cause behind many
   // stats-level `usedExports: true` modules. Preserve it as a first-class index
@@ -154,7 +199,14 @@ function main() {
   // reverse-BFS from a provider (M, E) up to terminal roots (origin with originExports===null)
   function chainsFor(M, E) {
     const chains = [];
-    const visited = new Set(); // `${ukey}\n${exp}`
+    const visited = new Map(); // ukey -> Set<export name>
+    const markVisited = (ukey, exportName) => {
+      const exports = visited.get(ukey) || new Set();
+      if (exports.has(exportName)) return false;
+      exports.add(exportName);
+      visited.set(ukey, exports);
+      return true;
+    };
     let expand = 0;
     let cappedHere = false;
     // stack frames: { node:[ukey,exp], edges:[...], depth }
@@ -162,9 +214,7 @@ function main() {
     while (stack.length) {
       if (chains.length >= MAX_CHAINS) { cappedHere = true; break; }
       const fr = stack.pop();
-      const vkey = `${fr.ukey}\n${fr.exp}`;
-      if (visited.has(vkey)) continue;
-      visited.add(vkey);
+      if (!markVisited(fr.ukey, fr.exp)) continue;
       if (fr.depth > MAX_DEPTH) { cappedHere = true; continue; }
       if (++expand > MAX_EXPAND) { cappedHere = true; break; }
 
@@ -227,24 +277,30 @@ function main() {
   }
 
   const usages = [];
-  for (const key of usedExports) {
-    const [uStr, exp] = key.split('\n');
-    const M = Number(uStr);
+  for (const [M, exportNames] of usedExports) {
     const m = modByUkey.get(M);
     if (!m) continue;
-    const { chains } = chainsFor(M, exp);
-    // dedupe terminals (keep one chain per terminal root, plus keep first few samples)
-    const seenTerminal = new Set();
-    const deduped = [];
-    for (const c of chains) {
-      if (seenTerminal.has(c.terminal)) continue;
-      seenTerminal.add(c.terminal);
-      deduped.push(c);
+    for (const exp of exportNames) {
+      const { chains, capped } = chainsFor(M, exp);
+      // dedupe terminals (keep one chain per terminal root, plus keep first few samples)
+      const seenTerminal = new Set();
+      const deduped = [];
+      for (const c of chains) {
+        if (seenTerminal.has(c.terminal)) continue;
+        seenTerminal.add(c.terminal);
+        deduped.push(c);
+      }
+      usages.push({ resource: m.path, exportName: exp, capped, chains: deduped });
     }
-    usages.push({ resource: m.path, exportName: exp, chains: deduped });
   }
 
   const out = {
+    schemaVersion: 1,
+    kind: 'rspack-export-usage-expanded',
+    complete: true,
+    generatedAt: new Date().toISOString(),
+    runId: raw.runId,
+    compilerId: raw.compilerId,
     generatedFrom: rawPath,
     moduleCount: modules.length,
     edgeCount: edges.length,
@@ -259,4 +315,32 @@ function main() {
   console.log(`wrote ${outPath}`);
 }
 
-main();
+function selfTest() {
+  const assert = require('assert');
+  assert.throws(() => validateRawCapture({}), /unsupported or missing schema/);
+  const valid = {
+    schemaVersion: 1,
+    kind: 'rspack-export-usage-capture',
+    complete: true,
+    generatedAt: '2026-01-02T03:04:05.000Z',
+    runId: 'run-test',
+    compilerId: 'web',
+    moduleCount: 0,
+    edgeCount: 0,
+    modules: [],
+    edges: [],
+  };
+  assert.equal(validateRawCapture(valid), valid);
+  assert.throws(() => validateRawCapture({ ...valid, moduleCount: 1 }), /counts do not match/);
+  const stringKeys = collectUsedExports([
+    { targetUkey: 'provider-a', targetExports: ['named'] },
+    { targetUkey: 'provider-b', targetExports: null },
+  ]);
+  assert.deepEqual([...stringKeys.get('provider-a')], ['named']);
+  assert.deepEqual([...stringKeys.get('provider-b')], ['*']);
+  console.log('build-all-export-usage self-test passed');
+}
+
+if (require.main === module) main();
+
+module.exports = { collectUsedExports, normalizeRawEdge, validateRawCapture };

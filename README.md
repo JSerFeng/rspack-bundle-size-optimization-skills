@@ -1,10 +1,10 @@
 # Rspack Bundle Size Optimization Skill
 
-A skill for autonomous, evidence-driven bundle optimization in Rspack-family builds (`Rspack`, `Rsbuild`, and `Rspeedy`). It exhausts every supported route and candidate, applies only production-measured changes with no observed residual risk, and repeats from a fresh baseline until it reaches a fixed point.
+A skill for exhaustive, evidence-driven bundle audits and explicitly requested optimization in Rspack-family builds (`Rspack`, `Rsbuild`, and `Rspeedy`). It resolves every supported route and candidate, separates diagnostic potential from production-measured savings, and repeats from a fresh baseline until it reaches a fixed point.
 
 ## What it does
 
-Starting an optimization runs all ten checks without asking the user to choose a mode. Explicitly read-only requests execute the same analysis without project edits.
+Analysis, investigation, review, and report requests run all ten checks in audit-only mode without project edits. Requests that explicitly ask to reduce, optimize, fix, apply, or implement enter optimize mode and may promote fully validated changes.
 
 | Check | Question it answers |
 | --- | --- |
@@ -21,13 +21,13 @@ Starting an optimization runs all ten checks without asking the user to choose a
 
 Each check ends as `completed`, `completed-no-op`, or `blocked`. Missing tools and incompatible APIs are reported as blocked with an exact unblock action; they are never disguised as “no candidates.”
 
-Data capture is not completion. Every candidate must receive a source-backed terminal disposition. Safe measured candidates are applied and validated automatically; risk-bearing candidates remain unapplied with a concrete failure mode and clearing condition.
+Data capture is not completion. Every candidate must receive a source-backed terminal disposition in the persisted run ledger. In optimize mode, safe measured candidates are applied and validated automatically; in audit-only mode they remain recorded as `validated-opportunity` because edits were not authorized. Risk-bearing candidates remain unapplied with a concrete failure mode and clearing condition.
 
 ## Safety and measurement rules
 
 - Rank and headline results by emitted JavaScript raw bytes; show gzip second.
 - Keep confirmed production savings separate from source-size sums, diagnostic upper bounds, and estimated attribution.
-- Run experiments from an isolated project-local audit directory with a manifest and fresh artifact IDs.
+- Run experiments from an isolated project-local audit directory with a manifest, a validated candidate ledger, and fresh artifact IDs.
 - Capture effective optimization values from `compilation.options`; do not infer them from author-written config.
 - Change one variable at a time between baseline and experiment.
 - Never infer `sideEffects:false` from filenames, ESM syntax, `node_modules`, or `usedExports=[]`.
@@ -39,7 +39,7 @@ Data capture is not completion. Every candidate must receive a source-backed ter
 The report includes:
 
 - summary metrics and the measurement contract;
-- coverage state and evidence for all ten checks, including the resolved optimization-config review;
+- coverage state, terminal candidate counts, and evidence for all ten checks, including the resolved optimization-config review;
 - confirmed savings, optimization potential, blocked work, and an action queue;
 - a searchable, sortable module list ordered by unused bytes by default;
 - selected-module source drill-down with exact red highlighting and search navigation;
@@ -117,6 +117,7 @@ rspack-bundle-optimization/
     ├── rollup-graph-capture-plugin.cjs
     ├── run-rollup-export-diff.cjs
     ├── transpiled-cjs-to-esm-loader.cjs
+    ├── ecma-compilation-tree-capture-plugin.template.cjs
     ├── ecma-module-capture-plugin.template.cjs
     ├── ecma-module-diff.cjs
     ├── sourcemap-generated-byte-attribution.cjs

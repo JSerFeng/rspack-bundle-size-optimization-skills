@@ -4,7 +4,10 @@
  * comparison. The capture is scoped to the exact appJs asset selection used by
  * the size metric; it intentionally does not record stats module.size.
  *
- * Minimal wiring (keep it env-gated and use one output file per compiler):
+ * Low-level single-compilation wiring (keep it env-gated and use one output
+ * file per compiler). Prefer ecma-compilation-tree-capture-plugin.template.cjs
+ * unless evidence proves that no selected appJs asset belongs to a child
+ * compilation:
  *
  *   const { EcmaModuleCapturePlugin } = require('./ecma-module-capture-plugin.cjs');
  *   if (process.env.RSPACK_ECMA_CAPTURE === '1') {

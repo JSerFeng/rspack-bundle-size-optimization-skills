@@ -27,6 +27,8 @@ Record in `manifest.json`:
 - lockfile, build-config, and relevant non-secret environment fingerprints;
 - every command, exit code, output directory, and artifact path.
 
+Maintain the generated sibling `candidate-ledger.json` throughout the run. It is the durable source for all ten route states, exhaustive candidate ids, terminal dispositions, evidence, and coverage counts; the task plan or conversation is not an audit ledger. Run the bundled `validate-ledger` command before report rendering.
+
 Never overwrite production `dist`, reuse an old experiment directory, or join artifacts from different run ids. Run builds sequentially when they share caches or framework temporary state.
 
 ## Production Baseline
@@ -42,9 +44,19 @@ If the project has multiple production compilers, capture and label each one. A 
 
 ## Resolved Optimization Configuration
 
-Use `scripts/optimization-config-check-plugin.template.cjs` behind `RSPACK_OPT_CONFIG=1` in the otherwise unchanged production build. Inject it through the framework's final Rspack-config mutation API.
+Use `scripts/optimization-config-check-plugin.template.cjs` behind `RSPACK_OPT_CONFIG=1` in the otherwise unchanged production build. Inject it through the framework's final Rspack-config mutation API. Pass a run id, a unique top-level compiler id, and the isolated route directory explicitly:
 
-Require one fresh `optimization-config*.json` for every top-level production compiler. Capture values from `compilation.options`, not from author-written config serialization. Include:
+```js
+new OptimizationConfigCheckPlugin({
+  runId: process.env.RSPACK_AUDIT_RUN_ID,
+  compilerId: "web",
+  outDir: process.env.RSPACK_OPT_CONFIG_OUT_DIR,
+});
+```
+
+Use a different `compilerId` for every top-level compiler. The plugin writes `optimization-config.<safe-run-id>.<safe-compiler-id>.json`, refuses to overwrite an existing artifact, and refuses to complete a failed build. Point `RSPACK_OPT_CONFIG_OUT_DIR` at a fresh empty directory inside the current run; never reuse a shared `tmp` path.
+
+Require one fresh identity-bearing `optimization-config*.json` for every top-level production compiler. Verify its `runId` and `compiler.id` before use. Capture values from `compilation.options`, not from author-written config serialization. Include:
 
 - pruning: `nodeEnv`, `providedExports`, `usedExports`, `sideEffects`, `innerGraph`, `concatenateModules`, and supported `inlineExports`;
 - minification and naming: `minimize`, JavaScript/CSS minimizers, and `mangleExports`;
@@ -66,7 +78,15 @@ Run each viable option independently against the original production baseline. R
 - raw/gzip totals and stats for every compiler;
 - `optimization-config*.json` and `optimization-config-check.md`;
 - complete resolved-option candidate dispositions;
+- validated `candidate-ledger.json` with all ten routes and exact coverage;
 - updated run manifest.
+
+## Tool Self-Tests
+
+```bash
+node <skill>/scripts/create-audit-run.cjs --self-test
+node <skill>/scripts/optimization-config-check-plugin.template.cjs --self-test
+```
 
 ## Completion Gate
 
