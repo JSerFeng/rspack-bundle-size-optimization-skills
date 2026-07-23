@@ -1,4 +1,4 @@
 interface:
   display_name: "Rspack Bundle Optimization"
-  short_description: "Audit bundles; optimize only when explicitly requested"
-  default_prompt: "Use $rspack-bundle-optimization to exhaustively audit this project's production bundle without project edits, resolve every candidate into the persisted ledger, and continue to a measured fixed point. Apply changes only if my request explicitly asks to optimize, reduce, fix, apply, or implement."
+  short_description: "Agent-led bundle analysis from captured compiler facts"
+  default_prompt: "Use $rspack-bundle-optimization. Let bundled JavaScript capture and measure factual data only; perform all opportunity discovery, semantic analysis, prioritization, risk review, changes, and conclusions yourself as the agent. Apply project edits only when my request explicitly asks to optimize, reduce, fix, apply, or implement."

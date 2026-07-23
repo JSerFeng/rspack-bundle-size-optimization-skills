@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Create and update an isolated, fingerprinted bundle-audit run directory.
+// Create an isolated data run and fingerprint recorded evidence.
+// This tool stores facts only. It has no candidate, verdict, or completion model.
 
 const {
   existsSync,
@@ -14,48 +15,96 @@ const {
 } = require('fs');
 const { createHash, randomBytes } = require('crypto');
 const { spawnSync } = require('child_process');
-const { basename, dirname, isAbsolute, resolve } = require('path');
+const { isAbsolute, relative, resolve, sep } = require('path');
 const { tmpdir } = require('os');
 
-const RUN_SUBDIRS = [
-  'baseline', 'reachability', 'retained-unused', 'side-effects', 'export-usage',
-  'rollup-diff', 'cjs2esm', 'splitchunks', 'ecma', 'post-loader', 'report',
-];
-const ROUTE_IDS = [
-  'baseline', 'reachability', 'retained-unused', 'side-effects', 'export-usage',
-  'rollup-diff', 'cjs2esm', 'splitchunks', 'ecma', 'post-loader',
-];
-const TERMINAL_DISPOSITIONS = new Set([
-  'applied', 'validated-opportunity', 'keep', 'risk-found', 'rejected', 'blocked',
-]);
-const TERMINAL_ROUTE_STATES = new Set(['completed', 'completed-no-op', 'blocked']);
+const RUN_SUBDIRS = ['baseline', 'captures', 'experiments', 'notes'];
 
 function parseArgs(argv) {
   const values = { _: [] };
-  for (let i = 2; i < argv.length; i++) {
-    const token = argv[i];
-    if (!token.startsWith('--')) { values._.push(token); continue; }
+  for (let index = 2; index < argv.length; index++) {
+    const token = argv[index];
+    if (!token.startsWith('--')) {
+      values._.push(token);
+      continue;
+    }
     const key = token.slice(2);
-    const next = argv[i + 1];
+    const next = argv[index + 1];
     if (!next || next.startsWith('--')) values[key] = true;
-    else { values[key] = next; i += 1; }
+    else {
+      values[key] = next;
+      index++;
+    }
   }
   return values;
 }
 
 function canonical(value) {
   const absolute = resolve(value);
-  try { return realpathSync.native(absolute); } catch { return absolute; }
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
 }
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function hashFile(file) {
-  if (!existsSync(file) || !statSync(file).isFile()) return null;
-  const body = readFileSync(file);
-  return { path: file, bytes: body.length, sha256: sha256(body) };
+function fingerprintFile(path) {
+  const body = readFileSync(path);
+  return {
+    kind: 'file',
+    path: canonical(path),
+    bytes: body.length,
+    sha256: sha256(body),
+  };
+}
+
+function listFiles(root) {
+  const rows = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile()) rows.push(path);
+    }
+  };
+  visit(root);
+  return rows.sort((left, right) => left.localeCompare(right));
+}
+
+function fingerprintDirectory(path) {
+  const root = canonical(path);
+  const files = listFiles(root);
+  const hash = createHash('sha256');
+  let bytes = 0;
+  for (const file of files) {
+    const body = readFileSync(file);
+    const name = relative(root, file).split(sep).join('/');
+    bytes += body.length;
+    hash.update(name);
+    hash.update('\0');
+    hash.update(sha256(body));
+    hash.update('\n');
+  }
+  return {
+    kind: 'directory',
+    path: root,
+    files: files.length,
+    bytes,
+    sha256: hash.digest('hex'),
+  };
+}
+
+function fingerprintPath(path) {
+  const absolute = canonical(path);
+  if (!existsSync(absolute)) throw new Error(`Cannot fingerprint missing path: ${absolute}`);
+  const stats = statSync(absolute);
+  if (stats.isFile()) return fingerprintFile(absolute);
+  if (stats.isDirectory()) return fingerprintDirectory(absolute);
+  throw new Error(`Unsupported evidence path type: ${absolute}`);
 }
 
 function runCommand(command, args, cwd) {
@@ -66,318 +115,236 @@ function runCommand(command, args, cwd) {
 function gitInfo(projectRoot) {
   const commit = runCommand('git', ['rev-parse', 'HEAD'], projectRoot);
   if (!commit) return { available: false, commit: null, dirty: null };
-  const status = runCommand('git', ['status', '--porcelain=v1', '--untracked-files=all'], projectRoot);
-  return { available: true, commit, dirty: Boolean(status), statusSha256: sha256(status || '') };
+  const status = runCommand(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all'],
+    projectRoot,
+  );
+  return {
+    available: true,
+    commit,
+    dirty: Boolean(status),
+    statusSha256: sha256(status || ''),
+  };
 }
 
-function isGitIgnored(projectRoot, candidate) {
-  return spawnSync('git', ['check-ignore', '-q', candidate], { cwd: projectRoot }).status === 0;
+function isGitIgnored(projectRoot, pathToCheck) {
+  return spawnSync('git', ['check-ignore', '-q', pathToCheck], {
+    cwd: projectRoot,
+  }).status === 0;
 }
 
 function chooseRunRoot(projectRoot, requested, allowUnignored) {
   if (requested) {
-    const chosen = canonical(isAbsolute(requested) ? requested : resolve(projectRoot, requested));
-    if (!allowUnignored && gitInfo(projectRoot).available && !isGitIgnored(projectRoot, chosen)) {
-      throw new Error(`Requested audit root is not git-ignored: ${chosen}. Choose an ignored project-local root or pass --allow-unignored deliberately.`);
+    const chosen = canonical(
+      isAbsolute(requested) ? requested : resolve(projectRoot, requested),
+    );
+    if (
+      !allowUnignored
+      && gitInfo(projectRoot).available
+      && !isGitIgnored(projectRoot, chosen)
+    ) {
+      throw new Error(
+        `Requested data root is not git-ignored: ${chosen}. `
+        + 'Choose an ignored project-local root or pass --allow-unignored deliberately.',
+      );
     }
     return chosen;
   }
-  const candidates = [
-    resolve(projectRoot, 'tmp', 'rspack-audit'),
-    resolve(projectRoot, '.tmp', 'rspack-audit'),
-    resolve(projectRoot, '.cache', 'rspack-audit'),
-    resolve(projectRoot, 'node_modules', '.cache', 'rspack-audit'),
+  const choices = [
+    resolve(projectRoot, 'tmp', 'rspack-bundle-data'),
+    resolve(projectRoot, '.tmp', 'rspack-bundle-data'),
+    resolve(projectRoot, '.cache', 'rspack-bundle-data'),
+    resolve(projectRoot, 'node_modules', '.cache', 'rspack-bundle-data'),
   ];
-  if (!gitInfo(projectRoot).available) return candidates[0];
-  const ignored = candidates.find((candidate) => isGitIgnored(projectRoot, candidate));
+  if (!gitInfo(projectRoot).available) return choices[0];
+  const ignored = choices.find((choice) => isGitIgnored(projectRoot, choice));
   if (!ignored) {
-    throw new Error('No known project-local ignored audit root was found. Inspect the project and pass --root <ignored-path>.');
+    throw new Error(
+      'No known project-local ignored data root was found. '
+      + 'Inspect the project and pass --root <ignored-path>.',
+    );
   }
   return ignored;
 }
 
-function packageVersion(projectRoot, name) {
-  try {
-    const packageJson = require.resolve(`${name}/package.json`, { paths: [projectRoot] });
-    return JSON.parse(readFileSync(packageJson, 'utf8')).version || null;
-  } catch {
-    try {
-      let current = dirname(require.resolve(name, { paths: [projectRoot] }));
-      while (dirname(current) !== current) {
-        const packageJson = resolve(current, 'package.json');
-        if (existsSync(packageJson)) return JSON.parse(readFileSync(packageJson, 'utf8')).version || null;
-        current = dirname(current);
-      }
-    } catch { /* package is not installed or its entry is not resolvable */ }
-    return null;
-  }
-}
-
-function configFingerprints(projectRoot, extraConfig) {
-  const names = new Set(['package.json']);
-  for (const name of readdirSync(projectRoot)) {
-    if (/^(rspack|rsbuild|rspeedy|edenx)\.config\.(js|cjs|mjs|ts|cts|mts)$/.test(name)) names.add(name);
-  }
-  for (const value of String(extraConfig || '').split(',').filter(Boolean)) names.add(value);
-  return [...names]
-    .map((name) => hashFile(isAbsolute(name) ? name : resolve(projectRoot, name)))
-    .filter(Boolean);
-}
-
-function lockfileFingerprint(projectRoot) {
-  for (const name of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lock', 'bun.lockb']) {
-    const fingerprint = hashFile(resolve(projectRoot, name));
-    if (fingerprint) return fingerprint;
-  }
-  return null;
-}
-
-function packageManagerInfo(projectRoot) {
-  const packageJson = existsSync(resolve(projectRoot, 'package.json'))
-    ? JSON.parse(readFileSync(resolve(projectRoot, 'package.json'), 'utf8'))
-    : {};
-  const declared = packageJson.packageManager || null;
-  const executable = declared ? declared.split('@')[0] : existsSync(resolve(projectRoot, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(resolve(projectRoot, 'yarn.lock')) ? 'yarn' : 'npm';
-  return { declared, executable, version: runCommand(executable, ['--version'], projectRoot) };
-}
-
-function envFingerprints(keys) {
-  return [...new Set(keys.filter(Boolean))].sort().map((key) => ({
-    key,
-    present: Object.prototype.hasOwnProperty.call(process.env, key),
-    valueSha256: Object.prototype.hasOwnProperty.call(process.env, key) ? sha256(String(process.env[key])) : null,
-  }));
-}
-
 function makeRunId() {
-  return `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}-${randomBytes(3).toString('hex')}`;
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}Z$/, 'Z');
+  return `${timestamp}-${randomBytes(3).toString('hex')}`;
 }
 
-function createCandidateLedger(runId) {
-  return {
-    schemaVersion: 1,
-    kind: 'rspack-bundle-candidate-ledger',
-    runId,
-    updatedAt: new Date().toISOString(),
-    routes: ROUTE_IDS.map((id) => ({
-      id,
-      state: 'pending',
-      coverage: {
-        discovered: null,
-        terminal: null,
-        unresolved: null,
-        applied: null,
-        riskFound: null,
-      },
-      result: null,
-      evidence: [],
-      candidates: [],
-    })),
-  };
-}
-
-function evidencePresent(value) {
-  if (Array.isArray(value)) return value.some(evidencePresent);
-  if (value && typeof value === 'object') return Object.values(value).some(evidencePresent);
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function validateCandidateLedger(ledger) {
-  if (!ledger || ledger.schemaVersion !== 1 || ledger.kind !== 'rspack-bundle-candidate-ledger') {
-    throw new Error('Candidate ledger has an unsupported or missing schema');
+function readManifest(runDir) {
+  const path = resolve(runDir, 'manifest.json');
+  if (!existsSync(path)) throw new Error(`Missing run manifest: ${path}`);
+  const manifest = JSON.parse(readFileSync(path, 'utf8'));
+  if (
+    manifest.schemaVersion !== 1
+    || manifest.kind !== 'rspack-bundle-data-run'
+  ) {
+    throw new Error('Unsupported or missing run manifest schema');
   }
-  if (typeof ledger.runId !== 'string' || !ledger.runId) throw new Error('Candidate ledger is missing runId');
-  if (!Array.isArray(ledger.routes)) throw new Error('Candidate ledger routes must be an array');
-  const routeById = new Map();
-  for (const route of ledger.routes) {
-    if (!route || typeof route.id !== 'string' || routeById.has(route.id)) {
-      throw new Error(`Candidate ledger contains a missing or duplicate route id: ${route?.id}`);
-    }
-    routeById.set(route.id, route);
+  if (canonical(manifest.runDir) !== canonical(runDir)) {
+    throw new Error('Manifest runDir does not match the selected run');
   }
-  const missing = ROUTE_IDS.filter((id) => !routeById.has(id));
-  const extra = [...routeById.keys()].filter((id) => !ROUTE_IDS.includes(id));
-  if (missing.length || extra.length) {
-    throw new Error(`Candidate ledger route mismatch; missing=${missing.join(',') || 'none'} extra=${extra.join(',') || 'none'}`);
-  }
-
-  for (const id of ROUTE_IDS) {
-    const route = routeById.get(id);
-    if (!TERMINAL_ROUTE_STATES.has(route.state)) throw new Error(`Route ${id} is not terminal`);
-    if (typeof route.result !== 'string' || !route.result.trim()) throw new Error(`Route ${id} is missing a result`);
-    if (!evidencePresent(route.evidence)) throw new Error(`Route ${id} is missing fresh evidence`);
-    if (route.state === 'blocked') {
-      for (const field of ['attemptedCommand', 'error', 'missingPrerequisite', 'nextCommand']) {
-        if (!route[field]) throw new Error(`Route ${id} blocked state is missing ${field}`);
-      }
-    }
-    if (!Array.isArray(route.candidates)) throw new Error(`Route ${id} candidates must be an array`);
-    const candidateIds = new Set();
-    let applied = 0;
-    let riskFound = 0;
-    for (const candidate of route.candidates) {
-      if (!candidate || typeof candidate.id !== 'string' || !candidate.id || candidateIds.has(candidate.id)) {
-        throw new Error(`Route ${id} contains a missing or duplicate candidate id: ${candidate?.id}`);
-      }
-      candidateIds.add(candidate.id);
-      if (!TERMINAL_DISPOSITIONS.has(candidate.disposition)) {
-        throw new Error(`Route ${id} candidate ${candidate.id} has a non-terminal disposition`);
-      }
-      if (!evidencePresent(candidate.evidence)) {
-        throw new Error(`Route ${id} candidate ${candidate.id} is missing source-backed evidence`);
-      }
-      if (typeof candidate.conclusion !== 'string' || !candidate.conclusion.trim()) {
-        throw new Error(`Route ${id} candidate ${candidate.id} is missing a conclusion`);
-      }
-      if (candidate.disposition === 'applied') applied++;
-      if (candidate.disposition === 'risk-found') {
-        riskFound++;
-        if (!candidate.risk || !candidate.clearingCondition) {
-          throw new Error(`Route ${id} candidate ${candidate.id} risk-found requires risk and clearingCondition`);
-        }
-      }
-      if (candidate.disposition === 'blocked') {
-        for (const field of ['attemptedCommand', 'error', 'missingPrerequisite', 'nextCommand']) {
-          if (!candidate[field]) throw new Error(`Route ${id} candidate ${candidate.id} blocked disposition is missing ${field}`);
-        }
-      }
-    }
-    const expectedCoverage = {
-      discovered: route.candidates.length,
-      terminal: route.candidates.length,
-      unresolved: 0,
-      applied,
-      riskFound,
-    };
-    const blockedCandidates = route.candidates.filter((candidate) => candidate.disposition === 'blocked');
-    if (blockedCandidates.length > 0 && route.state !== 'blocked') {
-      throw new Error(`Route ${id} contains blocked candidates but route state is ${route.state}`);
-    }
-    if (route.state === 'completed-no-op') {
-      const actionable = route.candidates.filter((candidate) => ['applied', 'validated-opportunity', 'risk-found'].includes(candidate.disposition));
-      if (actionable.length > 0) {
-        throw new Error(`Route ${id} completed-no-op contains actionable candidate dispositions`);
-      }
-    }
-    for (const [key, value] of Object.entries(expectedCoverage)) {
-      if (route.coverage?.[key] !== value) {
-        throw new Error(`Route ${id} coverage.${key} must be ${value}, got ${route.coverage?.[key]}`);
-      }
-    }
-  }
-  return ledger;
+  return { manifest, path };
 }
 
 function createRun(args) {
   const projectRoot = canonical(args['project-root'] || process.cwd());
-  const root = chooseRunRoot(projectRoot, args.root, Boolean(args['allow-unignored']));
-  const runId = String(args['run-id'] || makeRunId()).replace(/[^a-zA-Z0-9._-]/g, '-');
+  const root = chooseRunRoot(
+    projectRoot,
+    args.root,
+    Boolean(args['allow-unignored']),
+  );
+  const runId = String(args['run-id'] || makeRunId())
+    .replace(/[^a-zA-Z0-9._-]/g, '-');
   const runDir = resolve(root, runId);
-  if (existsSync(runDir)) throw new Error(`Audit run already exists: ${runDir}`);
-  mkdirSync(runDir, { recursive: true });
-  for (const subdir of RUN_SUBDIRS) mkdirSync(resolve(runDir, subdir), { recursive: true });
+  if (existsSync(runDir)) throw new Error(`Data run already exists: ${runDir}`);
 
-  const envKeys = ['NODE_ENV', 'BUILD_MODE', 'RSPACK_CONFIG_VALIDATE', ...String(args['env-keys'] || '').split(',')];
+  mkdirSync(runDir, { recursive: true });
+  for (const directory of RUN_SUBDIRS) {
+    mkdirSync(resolve(runDir, directory), { recursive: true });
+  }
+
   const manifest = {
-    version: 1,
+    schemaVersion: 1,
+    kind: 'rspack-bundle-data-run',
     runId,
     createdAt: new Date().toISOString(),
     projectRoot,
     runDir,
     buildCommand: args['build-command'] || null,
-    metricRule: args['metric-rule'] || 'emitted JavaScript raw bytes primary; gzip secondary; appJs inclusion list required',
+    assetScope: args['asset-scope'] || null,
     git: gitInfo(projectRoot),
     runtime: {
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
-      packageManager: packageManagerInfo(projectRoot),
-      packages: Object.fromEntries(['@rspack/core', '@rsbuild/core', '@rspeedy/core', '@swc/core', 'terser'].map((name) => [name, packageVersion(projectRoot, name)])),
-    },
-    fingerprints: {
-      lockfile: lockfileFingerprint(projectRoot),
-      configs: configFingerprints(projectRoot, args.config),
-      environment: envFingerprints(envKeys),
     },
     commands: [],
     artifacts: [],
-    candidateLedger: resolve(runDir, 'candidate-ledger.json'),
   };
-  writeFileSync(resolve(runDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  writeFileSync(resolve(runDir, 'candidate-ledger.json'), JSON.stringify(createCandidateLedger(runId), null, 2) + '\n');
+  writeFileSync(
+    resolve(runDir, 'manifest.json'),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
   return manifest;
+}
+
+function resolveInsideRun(runDir, value) {
+  const path = canonical(isAbsolute(value) ? value : resolve(runDir, value));
+  const rel = relative(runDir, path);
+  if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
+    throw new Error(`Evidence path must stay inside the data run: ${path}`);
+  }
+  return path;
 }
 
 function recordCommand(args) {
   const runDir = canonical(args['run-dir'] || '.');
-  const manifestPath = resolve(runDir, 'manifest.json');
-  if (!existsSync(manifestPath)) throw new Error(`Missing manifest: ${manifestPath}`);
+  const { manifest, path: manifestPath } = readManifest(runDir);
   if (!args.command) throw new Error('--command is required in record mode');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  if (canonical(manifest.runDir) !== runDir) throw new Error('Manifest runDir does not match --run-dir');
-  const artifacts = String(args.artifacts || '').split(',').filter(Boolean).map((value) => canonical(isAbsolute(value) ? value : resolve(runDir, value)));
+  if (args['exit-code'] === undefined) {
+    throw new Error('--exit-code is required in record mode');
+  }
+
+  const artifactPaths = String(args.artifacts || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => resolveInsideRun(runDir, value));
+  const artifacts = artifactPaths.map(fingerprintPath);
   const entry = {
     recordedAt: new Date().toISOString(),
-    command: args.command,
-    exitCode: args['exit-code'] === undefined ? null : Number(args['exit-code']),
-    outputDirectory: args['output-dir'] ? canonical(isAbsolute(args['output-dir']) ? args['output-dir'] : resolve(runDir, args['output-dir'])) : null,
+    command: String(args.command),
+    exitCode: Number(args['exit-code']),
+    outputDirectory: args['output-dir']
+      ? resolveInsideRun(runDir, args['output-dir'])
+      : null,
     artifacts,
   };
+  if (!Number.isSafeInteger(entry.exitCode)) {
+    throw new Error('--exit-code must be an integer');
+  }
+
   manifest.commands.push(entry);
-  manifest.artifacts = [...new Set([...(manifest.artifacts || []), ...artifacts])];
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  const byPath = new Map(
+    [...(manifest.artifacts || []), ...artifacts]
+      .map((artifact) => [artifact.path, artifact]),
+  );
+  manifest.artifacts = [...byPath.values()].sort((left, right) =>
+    left.path.localeCompare(right.path));
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return entry;
 }
 
-function validateLedger(args) {
+function verifyRun(args) {
   const runDir = canonical(args['run-dir'] || '.');
-  const manifestPath = resolve(runDir, 'manifest.json');
-  const ledgerPath = resolve(runDir, args.ledger || 'candidate-ledger.json');
-  if (!existsSync(manifestPath)) throw new Error(`Missing manifest: ${manifestPath}`);
-  if (!existsSync(ledgerPath)) throw new Error(`Missing candidate ledger: ${ledgerPath}`);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const ledger = validateCandidateLedger(JSON.parse(readFileSync(ledgerPath, 'utf8')));
-  if (manifest.runId !== ledger.runId) throw new Error('Candidate ledger runId does not match manifest runId');
+  const { manifest } = readManifest(runDir);
+  const checks = (manifest.artifacts || []).map((recorded) => {
+    const current = fingerprintPath(recorded.path);
+    return {
+      path: recorded.path,
+      matches:
+        recorded.kind === current.kind
+        && recorded.bytes === current.bytes
+        && recorded.sha256 === current.sha256
+        && (recorded.kind !== 'directory' || recorded.files === current.files),
+      recorded,
+      current,
+    };
+  });
+  const changed = checks.filter((check) => !check.matches);
+  if (changed.length) {
+    throw new Error(
+      `Evidence verification failed for ${changed.length} path(s): `
+      + changed.map((row) => row.path).join(', '),
+    );
+  }
   return {
-    runId: ledger.runId,
-    routes: ledger.routes.length,
-    discovered: ledger.routes.reduce((sum, route) => sum + route.coverage.discovered, 0),
-    terminal: ledger.routes.reduce((sum, route) => sum + route.coverage.terminal, 0),
-    checks: ledger.routes.map((route) => ({
-      id: route.id,
-      state: route.state,
-      result: route.result,
-      evidence: route.evidence,
-      coverage: route.coverage,
-      attemptedCommand: route.attemptedCommand || null,
-      error: route.error || null,
-      missingPrerequisite: route.missingPrerequisite || null,
-      nextCommand: route.nextCommand || null,
-    })),
+    runId: manifest.runId,
+    artifactCount: checks.length,
+    verified: checks.length,
   };
 }
 
 function selfTest() {
   const assert = require('assert');
-  const projectRoot = mkdtempSync(resolve(tmpdir(), 'rspack-audit-run-'));
+  const root = mkdtempSync(resolve(tmpdir(), 'rspack-bundle-data-run-'));
   try {
-    writeFileSync(resolve(projectRoot, 'package.json'), JSON.stringify({ name: 'fixture' }));
-    const manifest = createRun({ 'project-root': projectRoot, root: resolve(projectRoot, 'tmp', 'rspack-audit'), 'allow-unignored': true, 'run-id': 'test-run' });
-    recordCommand({ 'run-dir': manifest.runDir, command: 'fixture build', 'exit-code': '0', artifacts: 'baseline/stats.json' });
-    const ledgerPath = resolve(manifest.runDir, 'candidate-ledger.json');
-    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
-    assert.throws(() => validateCandidateLedger(ledger), /not terminal/);
-    for (const route of ledger.routes) {
-      route.state = 'completed-no-op';
-      route.coverage = { discovered: 0, terminal: 0, unresolved: 0, applied: 0, riskFound: 0 };
-      route.result = 'fixture no-op proof';
-      route.evidence = [`${route.id}/complete.json`];
-    }
-    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2) + '\n');
-    const validation = validateLedger({ 'run-dir': manifest.runDir });
-    const reread = JSON.parse(readFileSync(resolve(manifest.runDir, 'manifest.json'), 'utf8'));
-    if (reread.runId !== 'test-run' || reread.commands.length !== 1 || validation.routes !== 10 || !existsSync(resolve(manifest.runDir, 'report'))) throw new Error('self-test assertion failed');
-    console.log('create-audit-run self-test passed');
-  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+    writeFileSync(resolve(root, 'package.json'), '{"name":"fixture"}\n');
+    const manifest = createRun({
+      'project-root': root,
+      root: resolve(root, 'data'),
+      'allow-unignored': true,
+      'run-id': 'test-run',
+      'asset-scope': 'fixture JavaScript',
+    });
+    const artifact = resolve(manifest.runDir, 'baseline', 'measurement.json');
+    writeFileSync(artifact, '{"raw":10}\n');
+    recordCommand({
+      'run-dir': manifest.runDir,
+      command: 'fixture build',
+      'exit-code': '0',
+      artifacts: 'baseline/measurement.json',
+    });
+    const verification = verifyRun({ 'run-dir': manifest.runDir });
+    assert.equal(verification.verified, 1);
+    assert.throws(
+      () => resolveInsideRun(manifest.runDir, '../outside'),
+      /must stay inside/,
+    );
+    writeFileSync(artifact, '{"raw":11}\n');
+    assert.throws(
+      () => verifyRun({ 'run-dir': manifest.runDir }),
+      /verification failed/,
+    );
+    process.stdout.write('create-audit-run self-test passed\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function main(argv = process.argv) {
@@ -386,22 +353,20 @@ function main(argv = process.argv) {
   const mode = args._[0] || 'create';
   const result = mode === 'record'
     ? recordCommand(args)
-    : mode === 'validate-ledger'
-      ? validateLedger(args)
+    : mode === 'verify'
+      ? verifyRun(args)
       : createRun(args);
-  console.log(JSON.stringify(result, null, 2));
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 if (require.main === module) main();
+
 module.exports = {
-  ROUTE_IDS,
   RUN_SUBDIRS,
   chooseRunRoot,
-  createCandidateLedger,
   createRun,
-  gitInfo,
+  fingerprintPath,
   main,
   recordCommand,
-  validateCandidateLedger,
-  validateLedger,
+  verifyRun,
 };
