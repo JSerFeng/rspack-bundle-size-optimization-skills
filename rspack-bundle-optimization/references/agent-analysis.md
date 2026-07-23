@@ -22,6 +22,39 @@ From the production capture and measurements, the agent should distinguish:
 
 Module and source byte counts are triage scope, not confirmed savings.
 
+## Runtime loading decision tree
+
+When runtime coverage was requested, first verify the scenario before
+prioritizing any row:
+
+1. Did coverage start before navigation?
+2. Did every loaded JavaScript resource enter coverage?
+3. Were exact sources matched to V8 offsets?
+4. Were relevant page, iframe, and worker targets captured?
+5. Did repeated scenarios agree on resources, errors, and factory counts?
+
+If a check fails, first attempt to repair or repeat the capture. Preserve the
+failure reason and affected scope when it cannot be repaired.
+
+For each material zero-count factory or zero-count-heavy loaded asset, the
+agent then traces:
+
+1. browser resource and network initiator;
+2. Rspack asset, chunk, chunk group, entry/async root, and splitChunks rule;
+3. importing module and source-level loading boundary;
+4. complete module and consumer source, including callbacks and registration;
+5. behavior in other required scenarios and critical interactions;
+6. the user's intended availability and preload policy.
+
+The agent may conclude, with evidence, that the observed fact comes from an
+eager route import, coarse vendor sharing, speculative preload, delayed
+callback, duplicated instance, concatenated factory, error-only path, or an
+incomplete scenario. The data script must not make that classification.
+
+Development factory bytes are useful for choosing what the agent reads first,
+but remain diagnostic. Only a production-comparable asset/request delta is a
+confirmed gain.
+
 ## High-impact investigation order
 
 Use project evidence to choose the order. Common high-value areas include:
@@ -39,6 +72,8 @@ Use project evidence to choose the order. Common high-value areas include:
 10. transform targets, helpers, and polyfills;
 11. CSS, WASM, workers, and other assets when they materially affect the user
     request.
+12. loaded runtime assets whose module factories consistently have zero
+    counts in complete, stable scenarios.
 
 This is an agent checklist, not a list of mandatory scripts.
 
@@ -56,6 +91,10 @@ hypothesis, record:
 - production A/B result;
 - tests or runtime checks;
 - final agent conclusion.
+
+For a runtime-loading hypothesis, also record the scenario/repetition,
+resource initiator, target type, factory count evidence, loading cause, and
+critical-interaction replay.
 
 Do not let a filename, regex, stats field, or graph edge supply the
 conclusion.
@@ -82,6 +121,8 @@ facts about a build. They are not semantic verdicts.
 - Restore production minimization and concatenation for size measurements.
 - Use the same entries, dependencies, feature flags, and unrelated config.
 - Explain every meaningful asset/module/chunk change.
+- Replay the same runtime scenario when the hypothesis changes initial or
+  route loading, and exercise the interaction that should load deferred code.
 - Reject a hypothesis when a comparable build shows no relevant improvement
   or disproves its cause.
 - Do not promote a browser target, dependency replacement, public API change,

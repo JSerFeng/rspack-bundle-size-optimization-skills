@@ -127,6 +127,19 @@ function moduleResource(module) {
     || null;
 }
 
+function moduleId(compilation, module) {
+  return summarize(
+    safeCall(() => compilation.chunkGraph.getModuleId(module), null),
+  );
+}
+
+function concatenatedModuleIdentifiers(module) {
+  return normalizeIterable(module.modules)
+    .filter((nestedModule) => nestedModule && nestedModule !== module)
+    .map(moduleIdentifier)
+    .sort();
+}
+
 function chunkIdentifier(chunk) {
   if (chunk.id !== null && chunk.id !== undefined) return String(chunk.id);
   if (chunk.name) return `name:${chunk.name}`;
@@ -140,13 +153,16 @@ function makeModuleRecord(compilation, module, entryModules) {
     safeCall(() => chunkGraph.getModuleChunksIterable(module), []),
   ).map(chunkIdentifier).sort();
   return {
+    id: moduleId(compilation, module),
     identifier: moduleIdentifier(module),
     resource: moduleResource(module),
     type: module.type || null,
+    constructorName: module.constructor?.name || null,
     layer: module.layer || null,
     size: safeCall(() => module.size(), null),
     chunks,
     entry: entryModules.has(module),
+    concatenatedModules: concatenatedModuleIdentifiers(module),
     providedExports: normalizeExports(
       safeCall(() => moduleGraph.getProvidedExports(module), null),
     ),
@@ -178,9 +194,16 @@ function makeConnectionRecord(connection) {
 
 function makeChunkRecord(compilation, chunk) {
   const chunkGraph = compilation.chunkGraph;
-  const modules = normalizeIterable(
+  const chunkModules = normalizeIterable(
     safeCall(() => chunkGraph.getChunkModulesIterable(chunk), []),
-  ).map(moduleIdentifier).sort();
+  );
+  const modules = chunkModules.map(moduleIdentifier).sort();
+  const moduleMappings = chunkModules.map((module) => ({
+    id: moduleId(compilation, module),
+    identifier: moduleIdentifier(module),
+  })).sort((left, right) =>
+    `${String(left.id)}\0${left.identifier}`
+      .localeCompare(`${String(right.id)}\0${right.identifier}`));
   const entryModules = normalizeIterable(
     safeCall(() => chunkGraph.getChunkEntryModulesIterable(chunk), []),
   ).map(moduleIdentifier).sort();
@@ -193,6 +216,7 @@ function makeChunkRecord(compilation, chunk) {
     hasRuntime: safeCall(() => chunk.hasRuntime(), null),
     runtime: summarize(chunk.runtime),
     modules,
+    moduleMappings,
     entryModules,
   };
 }
@@ -415,7 +439,7 @@ class RspackBundleDataCapturePlugin {
       });
 
       const compilationData = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         kind: 'rspack-compilation-data',
         complete: true,
         generatedAt: new Date().toISOString(),
@@ -553,6 +577,20 @@ function selfTest() {
     identifier: () => 'javascript/auto|/fixture/a.js?raw',
     originalSource: () => ({ source: () => 'export const a = 1;\n' }),
   };
+  const compilation = {
+    chunkGraph: {
+      getModuleId: () => './a.js',
+      getModuleChunksIterable: () => [],
+    },
+    moduleGraph: {
+      getProvidedExports: () => new Set(['a']),
+      getUsedExports: () => new Set(['a']),
+    },
+  };
+  const moduleRecord = makeModuleRecord(compilation, module, new Set());
+  assert.equal(moduleRecord.id, './a.js');
+  assert.equal(moduleRecord.constructorName, 'Object');
+  assert.deepEqual(moduleRecord.concatenatedModules, []);
   const source = sourceRecord(module);
   assert.equal(source.resource, '/fixture/a.js?raw');
   assert.equal(source.bytes, Buffer.byteLength('export const a = 1;\n'));

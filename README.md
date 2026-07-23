@@ -15,6 +15,8 @@ for the agent.
 
 - capture resolved Rspack configuration, stats, module/chunk relationships,
   export-usage edges, and post-loader source;
+- normalize Chrome/V8 precise-coverage ranges into factual loaded-script and
+  generated module-factory records;
 - create an isolated run and fingerprint evidence;
 - measure exact raw and deterministic gzip bytes;
 - compare two measurements without interpreting the delta;
@@ -26,6 +28,8 @@ for the agent.
 - form and rank optimization hypotheses;
 - inspect graph, source, package metadata, and generated output;
 - distinguish real usage from mechanical retention;
+- connect runtime coverage to network initiators, chunk loading causes,
+  complete source, required scenarios, and product intent;
 - design and implement source/config/dependency changes;
 - judge semantic and product risk;
 - run production-comparable experiments and tests;
@@ -52,7 +56,9 @@ scripts/
 ├── create-audit-run.cjs
 ├── rspack-data-capture-plugin.template.cjs
 ├── measure-assets.cjs
-└── read-capture.cjs
+├── read-capture.cjs
+├── normalize-runtime-coverage.cjs
+└── verify-runtime-coverage-artifacts.cjs
 ```
 
 - `create-audit-run.cjs`: creates a run, records commands and artifact
@@ -63,12 +69,17 @@ scripts/
   compares two measurements.
 - `read-capture.cjs`: lists or prints captured post-loader source without
   classifying it.
+- `normalize-runtime-coverage.cjs`: maps exact Chrome/V8 script facts to
+  generated Rspack module-factory facts without deciding what is unwanted.
+- `verify-runtime-coverage-artifacts.cjs`: checks source, target, timing,
+  arithmetic, and artifact integrity and reports concrete failures.
 
 See:
 
 - `references/data-capture.md`
 - `references/agent-analysis.md`
 - `references/measurement.md`
+- `references/runtime-coverage.md`
 - `references/report-template.md`
 
 ## Install

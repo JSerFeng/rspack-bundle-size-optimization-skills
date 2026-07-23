@@ -59,8 +59,10 @@ The plugin writes factual artifacts only:
   - resolved configuration snapshot;
   - raw Stats JSON;
   - emitted asset records;
-  - module records and compiler-provided export states;
-  - chunk, chunk-group, entrypoint, and connection records;
+  - module identifiers, final module ids, concatenation membership, and
+    compiler-provided export states;
+  - chunk records with asset files and id-to-identifier mappings;
+  - chunk-group, entrypoint, and connection records;
 - `export-usage.json`
   - raw Rsdoctor modules and export-usage edges when supported;
 - `post-loader-sources.jsonl`
@@ -97,6 +99,11 @@ node <skill>/scripts/read-capture.cjs \
 Those queries expose facts. The agent must read the importing source, graph
 context, package metadata, and output before drawing a conclusion.
 
+When browser runtime coverage is in scope, the final module ids,
+concatenation membership, and chunk asset files provide the compiler side of
+the mapping. Read `runtime-coverage.md`; do not infer runtime execution from
+compiler membership alone.
+
 ## Failure handling
 
 - A failed production compilation produces no complete capture.
@@ -105,3 +112,6 @@ context, package metadata, and output before drawing a conclusion.
   `requireExportUsage:true` was requested.
 - A missing source is a factual gap, not evidence that a module is unused or
   removable.
+- A browser coverage export, source, target, or module-boundary mismatch must
+  retain its concrete failure reason. Attempt a fresh capture or exact-source
+  repair before accepting an incomplete runtime scope.
