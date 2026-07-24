@@ -78,7 +78,8 @@ The artifacts intentionally contain no `candidate`, `opportunity`, `verdict`,
 ## Agent use
 
 The agent reads and queries these artifacts with ordinary tools such as
-`jq`, `rg`, and `scripts/read-capture.cjs`.
+`jq`, `rg`, `scripts/read-capture.cjs`, and
+`scripts/extract-export-usage-context.cjs`.
 
 Examples:
 
@@ -94,10 +95,33 @@ jq '.chunks[] | {id, name, files, modules}' \
 node <skill>/scripts/read-capture.cjs \
   --dir <capture> \
   --source "package/path.js"
+
+node <skill>/scripts/extract-export-usage-context.cjs \
+  --dir <capture> \
+  --project-root <audited-package-root> \
+  --target "provider/package/path.js" \
+  --export "highImpactExport" \
+  --out <run>/notes/high-impact-export-context.json
 ```
 
 Those queries expose facts. The agent must read the importing source, graph
 context, package metadata, and output before drawing a conclusion.
+
+The export-context query reads raw edges in Rspack's
+`consumer -> provider` direction. It preserves every matched edge and its
+dependency id/location, extracts a bounded consumer snippet, and reports the
+complete enclosing top-level syntax owner plus nested callable chain when
+the captured source can be parsed. It refuses an unfiltered whole-graph dump
+and an implicit truncation. Raise `--max-matches` explicitly or narrow the
+provider/export filters.
+
+The script resolves `@babel/parser` from the audited package. Pass
+`--project-root` when capture metadata does not identify a package that
+provides it. A missing parser still permits location snippets to be captured,
+but the output is `complete:false`, exits non-zero, and names every affected
+edge. Source ambiguity, missing `loc`, out-of-bounds coordinates, parser
+recovery, and missing owners are likewise explicit failures rather than
+silent negative results.
 
 When browser runtime coverage is in scope, the final module ids,
 concatenation membership, and chunk asset files provide the compiler side of

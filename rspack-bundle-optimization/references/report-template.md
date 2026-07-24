@@ -11,6 +11,10 @@ bundled script.
 - Whether the result is material for the stated goal.
 - One plain-language sentence explaining the dominant result.
 
+When multiple changes landed, include a baseline-to-final waterfall and the
+independent production A/B contribution of each change. Do not make the
+reader subtract tables mentally.
+
 ## Applied changes
 
 For each change:
@@ -42,6 +46,10 @@ exact source matches, factory-boundary mapping, target coverage, browser
 errors, instability between repetitions, and every unresolved failure with
 its attempted remedy.
 
+Show per-repetition counts before the stable intersection. When the native
+DevTools Coverage panel was the fallback, say so explicitly and distinguish
+its `ui-range-inference` facts from precise call-count coverage.
+
 For each material agent-selected item, use:
 
 1. observed resource/chunk/module fact;
@@ -51,6 +59,11 @@ For each material agent-selected item, use:
 5. why the product does or does not need it at that point;
 6. production raw/gzip/request result;
 7. scenario replay, critical interaction, and risk checks.
+
+For a deferred-loading result, name the assets removed from first screen and
+show that those same assets returned during the critical interaction. Include
+the relevant source and consumer snippets; do not make the reader navigate
+raw JSON to understand the code change.
 
 Do not paste an unexplained table of zero-count factories. Keep complete JSONL
 as backing evidence and write the report for a reader who has not seen the
@@ -98,3 +111,8 @@ fix it if:
 - a capture/build/test failure lacks the actual error and attempted remedy;
 - diagnostic bytes could be mistaken for confirmed savings;
 - a conclusion cannot be traced to a named evidence artifact.
+
+For an HTML report, inspect at least the rendered conclusion, one detailed
+code/change section, the failure section, and a narrow viewport. Fix clipped
+text, unexplained abbreviations, hidden horizontal overflow, or evidence links
+that do not resolve.

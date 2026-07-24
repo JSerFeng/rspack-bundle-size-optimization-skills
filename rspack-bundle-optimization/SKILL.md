@@ -17,6 +17,24 @@ agent-supported conclusion.
 - Do not commit, push, publish, change browser support, replace a dependency,
   or change product behavior unless the request authorizes that action.
 
+## Build And Coverage Modes
+
+Keep task mode separate from build mode. Use these build modes consistently:
+
+- `development`: the project's ordinary development configuration. Use only
+  for local debugging or capability checks. Do not report its bytes, requests,
+  or coverage as production evidence.
+- `production`: the unchanged production configuration. Use for confirmed
+  emitted-byte, request, and user-facing savings.
+- `production-debug`: production with compression/minimization disabled,
+  `optimization.concatenateModules` disabled, and `optimization.moduleIds`
+  set to `named`; keep every other production entry, feature flag, target,
+  splitChunks, dependency, runtime, and plugin setting unchanged.
+
+Use `production-debug` for Rspack chunk/runtime coverage and source-level
+module-factory analysis. Treat its module and generated-byte facts as
+diagnostic evidence; prove savings with `production`.
+
 ## Hard JavaScript Boundary
 
 Bundled JavaScript is a data plane, never an analyst.
@@ -31,7 +49,10 @@ JavaScript may only:
 - calculate exact raw/gzip bytes and arithmetic deltas;
 - normalize exact browser coverage ranges and map them mechanically to
   generated Rspack module factories;
-- retrieve a requested captured record or source range.
+- retrieve a requested captured record or source range;
+- mechanically join a requested set of export-usage edges to captured
+  consumer locations, code snippets, enclosing declarations, and syntax
+  owner chains.
 
 JavaScript must never:
 
@@ -128,6 +149,25 @@ verifier. First attempt to solve any capture or mapping failure. If it remains
 unsolved, report its reason and affected scope; do not silently continue with
 a complete-sounding conclusion.
 
+For Rspack chunk/runtime coverage, use `production-debug`. First start a local
+production server, preview server, or serve command for that build, then probe
+the target home page and important APIs. For the real capture, start coverage
+first, then reload or navigate to the home page. If startup, navigation,
+login/session, proxy, API, or asset serving fails, inspect logs and try only
+safe, non-semantic fixes. Ask the user before applying or relying on a fix that
+changes the scenario, product behavior, auth state, API behavior,
+browser-support policy, feature flags, proxy/mocking strategy, or production
+comparability. If the correct fix is unclear, ask the user for help instead of
+inventing a local workaround and treating the capture as valid.
+
+Use the built-in Chrome DevTools Coverage panel only when the live MCP tool
+list lacks required coverage/source capability, or when the MCP coverage
+command fails and the exact error is recorded. Treat the panel export as the
+explicitly degraded fallback described in the reference; do not mislabel its
+used ranges as precise call counts. A stable first-screen production A/B uses
+three separate repetitions for baseline and candidate, followed by the
+critical interaction that must load deferred code.
+
 Runtime coverage is conditional evidence. Do not run it merely to add a
 metric when the user asks only about emitted production bytes.
 
@@ -145,6 +185,16 @@ impact and evidence quality.
 When runtime facts exist, the agent must determine why each material asset
 loaded and whether the observed product scenario actually wants the retained
 feature. A zero-count factory alone is not an optimization conclusion.
+
+For high-impact `usedExports` or export-usage questions, run
+`scripts/extract-export-usage-context.cjs` with a narrow provider/export
+filter. Read every returned consumer snippet, complete top-level owner, nested
+owner chain, importing boundary, and then the complete source. The script
+only exposes syntax facts. The agent decides whether the consumption is
+product-intended, accidentally eager, registration-only, feature-gated, or
+otherwise optimizable. Resolve any missing location, source match, parser, or
+owner failure first; if it remains unresolved, retain the exact reason and
+affected edge count in the report.
 
 ### 6. Experiments and edits
 

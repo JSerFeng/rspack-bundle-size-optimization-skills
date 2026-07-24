@@ -20,7 +20,10 @@ for the agent.
 - create an isolated run and fingerprint evidence;
 - measure exact raw and deterministic gzip bytes;
 - compare two measurements without interpreting the delta;
-- retrieve captured source on demand.
+- retrieve captured source on demand;
+- mechanically join requested export-usage edges to their post-loader
+  locations, bounded snippets, enclosing declarations, and syntax-owner
+  chains.
 
 ### Agent
 
@@ -57,6 +60,7 @@ scripts/
 ├── rspack-data-capture-plugin.template.cjs
 ├── measure-assets.cjs
 ├── read-capture.cjs
+├── extract-export-usage-context.cjs
 ├── normalize-runtime-coverage.cjs
 └── verify-runtime-coverage-artifacts.cjs
 ```
@@ -69,6 +73,11 @@ scripts/
   compares two measurements.
 - `read-capture.cjs`: lists or prints captured post-loader source without
   classifying it.
+- `extract-export-usage-context.cjs`: joins filtered raw export-usage edges to
+  every captured consumer location and mechanically extracts snippets and
+  enclosing syntax owners. Missing locations, source ambiguity, parser
+  failures, and truncated owner source remain explicit failures for the
+  agent.
 - `normalize-runtime-coverage.cjs`: maps exact Chrome/V8 script facts to
   generated Rspack module-factory facts without deciding what is unwanted.
 - `verify-runtime-coverage-artifacts.cjs`: checks source, target, timing,
