@@ -40,11 +40,13 @@ For each material zero-count factory or zero-count-heavy loaded asset, the
 agent then traces:
 
 1. browser resource and network initiator;
-2. Rspack asset, chunk, chunk group, entry/async root, and splitChunks rule;
-3. importing module and source-level loading boundary;
-4. complete module and consumer source, including callbacks and registration;
-5. behavior in other required scenarios and critical interactions;
-6. the user's intended availability and preload policy.
+2. Rspack asset, chunk, chunk group, entry/async root, and effective
+   dynamic-import chunk-name and mode relationships;
+3. applicable splitChunks rule;
+4. importing module and source-level loading boundary;
+5. complete module and consumer source, including callbacks and registration;
+6. behavior in other required scenarios and critical interactions;
+7. the user's intended availability and preload policy.
 
 The agent may conclude, with evidence, that the observed fact comes from an
 eager route import, coarse vendor sharing, speculative preload, delayed
@@ -54,6 +56,44 @@ incomplete scenario. The data script must not make that classification.
 Development factory bytes are useful for choosing what the agent reads first,
 but remain diagnostic. Only a production-comparable asset/request delta is a
 confirmed gain.
+
+## Chunk loading-boundary analysis
+
+Before attributing unexpected async fan-in or co-loading to `splitChunks`,
+scan the audited project's user-owned disk and parser-visible post-loader
+source for `webpackChunkName` and `rspackChunkName` magic comments on dynamic
+`import()` calls. Start with a mechanical text search, but inspect each
+complete import because a magic comment may span lines or contain multiple
+directives. Include its effective `webpackMode` or `rspackMode`, including
+project parser defaults, and keep top-level compilers separate.
+
+For each matching import, record the source location, request or context
+candidates, literal chunk-name and mode annotations, importer or route, and
+captured chunk-group name and origins. Use compiler diagnostics and captured
+output to resolve prefix precedence, ignored annotations, and `[request]` or
+`[index]` expansion. An `eager` or `weak` import does not create the same lazy
+loading boundary, while `lazy-once` can combine a context import's candidates
+without repeated source annotations. Group imports by their effective captured
+chunk group within one compiler, never by the literal comment alone.
+
+Reusing one effective name across lazy dynamic imports connects their async
+blocks to the same named chunk group. This can co-locate the target modules and
+their synchronously reachable dependencies that were not already available or
+subsequently extracted. Nested dynamic imports retain their own boundaries
+unless their effective group options independently merge them. Later chunk
+optimizations may also produce multiple chunks in that group. Triggering one
+import can therefore load code introduced by another import with that
+effective name. Verify the cause against captured group origins, module
+membership, and generated output.
+
+Only after accounting for shared effective chunk-name relationships should
+the agent attribute the remaining fan-in, duplication, or co-loading to
+`splitChunks`. Avoid giving many independent dynamic imports the same
+effective name unless their co-loading is intentional and supported by route,
+request, and cache policy. In optimize mode, test removing the shared name or
+assigning separate names as a narrow experiment, then compare production
+route bytes, requests, loading order, cache behavior, and the required
+interaction.
 
 ## High-impact investigation order
 
@@ -68,11 +108,13 @@ Use project evidence to choose the order. Common high-value areas include:
 6. side-effect metadata or package-boundary problems that prevent pruning;
 7. namespace/dynamic-import flows that keep whole modules live;
 8. CommonJS or mixed-module packaging that prevents export pruning;
-9. splitChunks fan-in, duplication, request, or cache tradeoffs;
-10. transform targets, helpers, and polyfills;
-11. CSS, WASM, workers, and other assets when they materially affect the user
+9. shared effective `webpackChunkName` or `rspackChunkName` fan-in across
+   dynamic imports;
+10. splitChunks fan-in, duplication, request, or cache tradeoffs;
+11. transform targets, helpers, and polyfills;
+12. CSS, WASM, workers, and other assets when they materially affect the user
     request.
-12. loaded runtime assets whose module factories consistently have zero
+13. loaded runtime assets whose module factories consistently have zero
     counts in complete, stable scenarios.
 
 This is an agent checklist, not a list of mandatory scripts.
