@@ -1,195 +1,125 @@
-# Agent Analysis
+# Analyzing Captured Data
 
-## Principle
+Bundled scripts provide records and arithmetic. The agent decides why code is
+present, whether it should change, and whether the result is safe.
 
-The agent performs the analysis. Bundled scripts provide facts and arithmetic
-only.
+## Start with the bytes that matter
 
-Do not follow a fixed script route merely because it exists. Start with the
-largest plausible product impact, then request the evidence needed to accept
-or disprove each hypothesis.
+Use the exact definitions in [measurement.md](measurement.md) and keep these
+asset sets separate:
 
-## Build the byte surface
+- total emitted JavaScript for one compiler;
+- HTML-requested initial JavaScript;
+- entrypoint-initial JavaScript;
+- a static route or async chunk group;
+- JavaScript actually requested during a route or interaction.
 
-From the production capture and measurements, the agent should distinguish:
+Within each set, distinguish first-party, third-party, runtime, helper, and
+polyfill code, duplicate modules or package versions, and large assets whose
+source is unclear.
 
-- total emitted JavaScript;
-- HTML-injected or entrypoint-initial JavaScript;
-- important route or async-group JavaScript;
-- first-party, third-party, runtime, helper, and polyfill scope;
-- duplicated modules or package versions;
-- opaque or poorly attributed large assets.
+Module size and source size help choose what to read first. They are not
+confirmed savings.
 
-Module and source byte counts are triage scope, not confirmed savings.
+Common areas worth checking include:
 
-## Runtime loading decision tree
+1. large packages or features loaded before they are needed;
+2. broad package, barrel, namespace, or dynamic imports;
+3. duplicate package versions or code repeated across chunks;
+4. dev, mock, debug, registration, or side-effect code in production;
+5. CommonJS or mixed-module packages that prevent export pruning;
+6. shared dynamic-import names and splitChunks rules that load unrelated code
+   together;
+7. transform targets, helpers, locales, icons, and polyfills;
+8. CSS, WASM, and workers when they affect the requested metric;
+9. browser-loaded assets whose generated module wrappers did not run in any
+   complete repeated scenario.
 
-When runtime coverage was requested, first verify the scenario before
-prioritizing any row:
+Choose the order from project evidence; this list is not a required sequence.
 
-1. Did coverage start before navigation?
-2. Did every loaded JavaScript resource enter coverage?
-3. Were exact sources matched to V8 offsets?
-4. Were relevant page, iframe, and worker targets captured?
-5. Did repeated scenarios agree on resources, errors, and factory counts?
+## When runtime data exists
 
-If a check fails, first attempt to repair or repeat the capture. Preserve the
-failure reason and affected scope when it cannot be repaired.
+First verify the capture using
+[runtime-coverage.md](runtime-coverage.md#verify-the-capture). For each
+important loaded asset or generated module wrapper with no observed execution,
+trace:
 
-For each material zero-count factory or zero-count-heavy loaded asset, the
-agent then traces:
-
-1. browser resource and network initiator;
-2. Rspack asset, chunk, chunk group, entry/async root, and effective
-   dynamic-import chunk-name and mode relationships;
-3. applicable splitChunks rule;
+1. browser URL and network initiator;
+2. Rspack asset, chunk, chunk group, entry or async root;
+3. the splitChunks rule, when one applies;
 4. importing module and source-level loading boundary;
-5. complete module and consumer source, including callbacks and registration;
-6. behavior in other required scenarios and critical interactions;
-7. the user's intended availability and preload policy.
+5. complete module and consumer source;
+6. other required scenarios and critical interactions;
+7. whether the product intends the feature to be available at that point.
 
-The agent may conclude, with evidence, that the observed fact comes from an
-eager route import, coarse vendor sharing, speculative preload, delayed
-callback, duplicated instance, concatenated factory, error-only path, or an
-incomplete scenario. The data script must not make that classification.
+A zero count alone does not show that code is unused or safe to defer.
+`production-debug` byte counts for generated module wrappers help locate code;
+only the matching production request or asset difference confirms a saving.
 
-Development factory bytes are useful for choosing what the agent reads first,
-but remain diagnostic. Only a production-comparable asset/request delta is a
-confirmed gain.
+## Explain why dynamic imports load together
 
-## Chunk loading-boundary analysis
+Before blaming splitChunks, search both disk source and source after loaders
+for `webpackChunkName`, `rspackChunkName`, `webpackMode`, and `rspackMode`
+on dynamic `import()` calls. Include project parser defaults and keep
+top-level compilers separate.
 
-Before attributing unexpected async fan-in or co-loading to `splitChunks`,
-scan the audited project's user-owned disk and parser-visible post-loader
-source for `webpackChunkName` and `rspackChunkName` magic comments on dynamic
-`import()` calls. Start with a mechanical text search, but inspect each
-complete import because a magic comment may span lines or contain multiple
-directives. Include its effective `webpackMode` or `rspackMode`, including
-project parser defaults, and keep top-level compilers separate.
+For each import, record its source location; the requested module, or all
+possible modules for a context import; the chunk name and import mode Rspack
+actually used; the importing module or route; and the chunk group recorded by
+the compiler. Use compiler messages and emitted output to resolve ignored
+comments, prefix precedence, and `[request]` or `[index]` expansion.
 
-For each matching import, record the source location, request or context
-candidates, literal chunk-name and mode annotations, importer or route, and
-captured chunk-group name and origins. Use compiler diagnostics and captured
-output to resolve prefix precedence, ignored annotations, and `[request]` or
-`[index]` expansion. An `eager` or `weak` import does not create the same lazy
-loading boundary, while `lazy-once` can combine a context import's candidates
-without repeated source annotations. Group imports by their effective captured
-chunk group within one compiler, never by the literal comment alone.
+`eager` and `weak` do not create the same lazy boundary as an ordinary dynamic
+import. `lazy-once` can group all requests from one context import.
 
-Reusing one effective name across lazy dynamic imports connects their async
-blocks to the same named chunk group. This can co-locate the target modules and
-their synchronously reachable dependencies that were not already available or
-subsequently extracted. Nested dynamic imports retain their own boundaries
-unless their effective group options independently merge them. Later chunk
-optimizations may also produce multiple chunks in that group. Triggering one
-import can therefore load code introduced by another import with that
-effective name. Verify the cause against captured group origins, module
-membership, and generated output.
+Group imports by the captured effective chunk group, not by comment text alone.
+Reusing one effective name can connect several lazy imports to the same group,
+so triggering one import can load modules introduced by another. Nested
+dynamic imports keep their own boundary unless their effective options also
+merge them. Later chunk optimization may split one group into several files.
 
-Only after accounting for shared effective chunk-name relationships should
-the agent attribute the remaining fan-in, duplication, or co-loading to
-`splitChunks`. Avoid giving many independent dynamic imports the same
-effective name unless their co-loading is intentional and supported by route,
-request, and cache policy. In optimize mode, test removing the shared name or
-assigning separate names as a narrow experiment, then compare production
-route bytes, requests, loading order, cache behavior, and the required
-interaction.
+Only after checking those relationships should splitChunks be treated as the
+cause. When changing the boundary, compare route bytes, requests, loading
+order, cache behavior, and the interaction that must still work.
 
-## High-impact investigation order
+## Keep notes for each important item
 
-Use project evidence to choose the order. Common high-value areas include:
-
-1. large package or source contributions;
-2. broad package/barrel imports when narrower public subpaths exist;
-3. heavy features, editors, charts, SDKs, locales, icons, or renderers loaded
-   before they are needed;
-4. duplicate package versions or repeated code across chunks;
-5. dev-only, mock, debug, or registration code present in production;
-6. side-effect metadata or package-boundary problems that prevent pruning;
-7. namespace/dynamic-import flows that keep whole modules live;
-8. CommonJS or mixed-module packaging that prevents export pruning;
-9. shared effective `webpackChunkName` or `rspackChunkName` fan-in across
-   dynamic imports;
-10. splitChunks fan-in, duplication, request, or cache tradeoffs;
-11. transform targets, helpers, and polyfills;
-12. CSS, WASM, workers, and other assets when they materially affect the user
-    request.
-13. loaded runtime assets whose module factories consistently have zero
-    counts in complete, stable scenarios.
-
-This is an agent checklist, not a list of mandatory scripts.
-
-## Hypothesis record
-
-Keep an agent-authored record under `<run>/notes/`. For each material
-hypothesis, record:
+Store agent-written notes under `<run>/notes/`. Record:
 
 - affected assets, chunks, modules, packages, and import sites;
-- factual evidence paths and relevant source locations;
-- plausible emitted-byte or loading-path impact;
+- evidence files and source locations;
 - why the code is present;
-- proposed experiment;
-- semantic and product risks;
-- production A/B result;
-- tests or runtime checks;
-- final agent conclusion.
+- the change being considered and its likely effect;
+- correctness and product risks;
+- final conclusion.
 
-For a runtime-loading hypothesis, also record the scenario/repetition,
-resource initiator, target type, factory count evidence, loading cause, and
-critical-interaction replay.
+In `audit-only`, record the unchanged production measurement and mark every
+suggested change as unmeasured. In `optimize`, also record the before/after
+production result and the relevant build, test, and runtime checks.
 
-Do not let a filename, regex, stats field, or graph edge supply the
-conclusion.
+For runtime items, also record the scenario, run number, initiator, target
+type, loading cause, module-wrapper execution count, and required-interaction
+result.
 
-## Required source reasoning
+## Read source before deciding
 
 For side effects and export usage, inspect:
 
-- complete disk source and post-loader source;
-- top-level calls, assignments, registration, mutation, style/DOM work,
+- complete disk source and source after loaders;
+- top-level calls, assignments, registration, mutation, DOM/style work,
   environment reads, worker setup, and import-only execution;
-- nearest `package.json`, including `exports`, `sideEffects`, conditions,
-  `module`, `main`, `browser`, and `type`;
-- the consumer import/reference site;
-- relevant entry, async boundary, chunk, and runtime behavior.
+- the nearest `package.json`, especially `exports`, `sideEffects`,
+  conditions, `module`, `main`, `browser`, and `type`;
+- consumer import/reference sites;
+- relevant entries, async boundaries, chunks, and runtime behavior.
 
-Compiler `usedExports`, `providedExports`, bailouts, and export-usage edges are
-facts about a build. They are not semantic verdicts.
+`usedExports`, `providedExports`, bailouts, and export-usage edges describe
+one build. They do not decide whether the product needs the code.
 
-### Export-usage semantic review
+### Review export usage in source
 
-`used` proves that a build found a consumption path. It does not prove that
-the product intends to consume the export, that the importing feature belongs
-in the measured route, or that the broad loading boundary is appropriate.
-
-For every high-impact export, the factual capture should give the agent:
-
-- every resolved usage location, not only the first one;
-- a bounded post-loader code snippet around each usage;
-- the complete enclosing top-level declaration or exported symbol;
-- the chain from a nested callback usage back to that top-level owner;
-- the importer/consumer snippet and relevant dynamic-import or registration
-  boundary.
-
-For example, if `usedFoo` appears only inside `bar`, which is returned by
-top-level `foo`, the fact record should make the relationship
-`foo -> usedFoo` visible instead of handing the agent an isolated identifier:
-
-```js
-function foo() {
-  return function bar() {
-    console.log(usedFoo);
-  };
-}
-```
-
-A bundled script may extract locations, syntax relationships, hashes, and
-snippets. The agent must still read the complete source and decide whether
-the usage is intended, eager by mistake, registration-only, feature-gated, or
-otherwise optimizable.
-
-Use the factual extractor for each high-impact provider/export rather than
-handing the agent only an aggregate `usedExports` value:
+For an important provider/export, inspect every resolved use, not only the
+aggregate `usedExports` value:
 
 ```bash
 node <skill>/scripts/extract-export-usage-context.cjs \
@@ -197,65 +127,133 @@ node <skill>/scripts/extract-export-usage-context.cjs \
   --project-root <audited-package-root> \
   --target "provider/package/path.js" \
   --export "exportName" \
-  --out <run>/notes/exportName-context.json
+  --out <run>/notes/export-context.json
 ```
 
-Review every matched edge. The extracted
-`mechanicalOwnerToTargetExport`, such as `foo -> usedFoo`, is only a syntax
-relationship. Confirm product intent from the complete consumer/provider
-source, import or registration boundary, route/chunk reason, runtime
-behavior, and production-comparable experiment.
+Read each snippet, the complete top-level function, variable, or export that
+contains it, the path through nested callbacks, the import boundary, and then
+the complete source.
 
-The extractor must not silently turn a missing location, source mismatch,
-ambiguous post-loader row, parser failure/recovery, oversized omitted owner
-source, or missing syntax owner into “no usage.” Retry with the correct
-capture/package root or read the raw source directly. If the gap cannot be
-resolved, record its exact reason and affected edge/module count and keep the
-semantic review incomplete for that scope.
+The field `mechanicalOwnerToTargetExport`, for example
+`foo -> usedFoo`, describes syntax only. Confirm product intent from the
+provider and consumer source, route/chunk reason, runtime behavior, and
+production output.
 
-### ECMAScript target attribution
+Missing locations, ambiguous source, parser recovery, omitted containing code,
+or a missing callback path must not become “no usage.” Fix the capture or
+record the exact missing data and affected edges.
 
-When raising the ECMAScript target produces a material size change, do not
-attribute the full delta to polyfills or newer syntax from the top-level total
-alone. Partition the A/B into:
+#### Dynamic imports used as namespaces
+
+A namespace use receives the module object instead of one named export. When
+namespace rows are numerous or affect large modules, map every row back to the
+source `import()` that created it. One import can create several graph rows,
+so graph-row count is not the number of source edits.
+
+Start with the original source before Babel or SWC transforms it. Follow every
+property read, destructuring statement, alias, helper call, return, assignment,
+and stored reference. A transform may keep the `import()` call while breaking
+Rspack's link from later property reads back to that import; this is why the
+export list must be derived before lowering.
+
+Collect names with these rules:
+
+- `ns.foo` and `ns["foo"]` use `foo`;
+- destructuring uses the imported property name, including `default`, not its
+  local alias;
+- a non-literal key, rest property, spread, enumeration, reflection,
+  re-export, or unresolved passing/returning/storing means the list is not
+  complete;
+- an import used only to run a module requires side-effect analysis; do not
+  infer an empty export list from the absence of property reads.
+
+Combine names from every consumer reachable from the result of the same source
+`import()` call site. Do not use one graph row, one destructuring statement,
+or one runtime scenario as the complete list.
+
+Once every reachable consumer has been resolved and the complete export-name
+list is known, record the proposed comment without editing tracked source in
+`audit-only`. In `optimize`, add `rspackExports` at the original dynamic
+import:
+
+```js
+const ns = await import(
+  /* rspackExports: ["foo"] */
+  "pkg"
+);
+ns.foo();
+```
+
+For destructuring, the comment still uses provider export names:
+
+```js
+const { foo, bar: localBar } = await import(
+  /* rspackExports: ["foo", "bar"] */
+  "pkg"
+);
+```
+
+Use `rspackExports` for Rspack. Preserve unrelated magic comments. If the
+import already has `rspackExports` or `webpackExports`, update one verified
+list instead of leaving duplicate or conflicting export lists. Keep
+`webpackExports` only when existing project code already uses it and a build
+with the compiler that actually runs proves that name is recognized.
+
+Verification means identifying the compiler version that actually runs,
+checking any parser warning or error, recapturing export usage, and inspecting
+the emitted output. A package manifest version alone is not enough when the
+project can load another compiler installation.
+
+Then inspect source after loaders. Babel or SWC may lower the surrounding
+`await` flow, but the dynamic `import()` and comment must still be present
+where Rspack can parse them. If any namespace use remains unknown, do not guess
+the list.
+
+Capture export usage again and confirm that Rspack now treats only the intended
+named exports as used. Inspect emitted chunks and compare total, initial, and
+relevant async raw bytes before and after with the same production settings;
+show gzip second. If the output does not improve, report no measured
+bundle-size effect.
+
+### Explain ECMAScript target changes
+
+When a newer ECMAScript target changes size, do not attribute the entire
+difference to polyfills or newer syntax. Separate:
 
 - polyfill assets and modules;
-- non-polyfill modules removed or added;
+- modules added or removed;
 - modules present in both builds whose generated bytes changed;
-- loader/transpiler/runtime-helper output changes;
+- loader, transpiler, and runtime-helper output;
 - chunk membership and concatenation changes.
 
-Compare module inventory and per-module generated bytes first. For each large
-non-polyfill delta, inspect disk source and post-loader source in both builds
-and have the agent explain the concrete transform difference. If source maps
-or module attribution are incomplete, record that failure and do not report
-an unexplained residual as confirmed ECMA savings.
+Inspect source before and after loaders for the largest changed modules. If
+source maps or per-module details are incomplete, report the missing data
+instead of assigning the unexplained bytes to the target change.
 
-## Experiment design
+## Compare a change (`optimize` only)
 
-- Change one hypothesis at a time.
-- Preserve the original production baseline.
-- Restore production minimization and concatenation for size measurements.
-- Use the same entries, dependencies, feature flags, and unrelated config.
-- Explain every meaningful asset/module/chunk change.
-- Replay the same runtime scenario when the hypothesis changes initial or
-  route loading, and exercise the interaction that should load deferred code.
-- Reject a hypothesis when a comparable build shows no relevant improvement
-  or disproves its cause.
-- Do not promote a browser target, dependency replacement, public API change,
-  or product behavior change without the required authority.
+- Change one thing at a time.
+- Preserve the unchanged production build and measurement.
+- Restore production minimization and concatenation for size measurement.
+- Keep entries, dependencies, feature flags, and unrelated config unchanged.
+- Explain each meaningful asset, module, or chunk change.
+- Repeat the same runtime scenario when initial or route loading changes.
+- Drop a change when a comparable build shows no relevant improvement or
+  disproves its cause.
+- Do not keep a browser-support target, dependency, public API, or product
+  behavior change without authorization.
 
-## Completion
+## Finish the analysis
 
-Candidate-count closure is not enough. Before finishing, the agent must show:
+Before finishing, show:
 
-- which byte surfaces were examined;
-- which material hypotheses were tested;
-- what remains unexplained or unattributed;
-- whether remaining large opportunities are required, risky, policy-bound,
-  upstream-bound, rejected, or blocked;
-- a fresh final production measurement after applied changes.
+- which large sources of JavaScript were examined;
+- which important changes were proposed or, in `optimize`, applied and checked;
+- what remains unexplained;
+- which remaining items are required, too risky, need a user or team decision,
+  depend on another package, were ruled out, or are blocked;
+- the unchanged production measurement in `audit-only`, or a fresh final
+  production measurement after applied changes in `optimize`.
 
-If only small improvements are safe, say so and provide the evidence that the
-larger surfaces were investigated. Do not present a few kilobytes as a
-material success merely because a checklist is complete.
+Do not present a small saving as the whole result while larger in-scope items
+remain unexplained.

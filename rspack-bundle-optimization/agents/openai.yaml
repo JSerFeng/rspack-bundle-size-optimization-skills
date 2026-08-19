@@ -1,4 +1,4 @@
 interface:
   display_name: "Rspack Bundle Optimization"
-  short_description: "Agent-led compiler and Chrome coverage bundle analysis"
-  default_prompt: "Use $rspack-bundle-optimization. Let bundled JavaScript capture, normalize, verify, and measure factual compiler/browser data only; perform all opportunity discovery, loading-cause and source analysis, prioritization, risk review, changes, and conclusions yourself as the agent. Treat a zero runtime count only as not observed in the recorded scenario. Apply project edits only when my request explicitly asks to optimize, reduce, fix, apply, or implement."
+  short_description: "Measured Rspack bundle analysis and reduction"
+  default_prompt: "Use $rspack-bundle-optimization to find why this project emits or loads JavaScript, apply changes only if I request them, and report production results with raw bytes first and gzip second."

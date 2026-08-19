@@ -1,118 +1,126 @@
-# Agent Report Template
+# Report Template
 
-The agent writes the report directly. Do not generate analytical prose with a
-bundled script.
+Write the report for a reader who has not seen the capture tools. Link the
+evidence, but explain the source and result in the report itself.
 
-## Conclusion
+## Result
 
-- Baseline scope and exact raw/gzip bytes.
-- Final scope and exact raw/gzip bytes.
-- Confirmed delta.
-- Whether the result is material for the stated goal.
-- One plain-language sentence explaining the dominant result.
+For an `audit-only` report, state:
 
-When multiple changes landed, include a baseline-to-final waterfall and the
-independent production A/B contribution of each change. Do not make the
-reader subtract tables mentally.
+- the unchanged production scopes, with exact raw bytes first and gzip second;
+- the largest explained sources and any important unexplained remainder;
+- missing data or checks that limit the conclusion;
+- proposed changes, clearly marked as not applied and not measured.
 
-## Applied changes
+Do not invent a difference or confirmed saving for an audit-only run.
 
-For each change:
+For an `optimize` report, state:
 
-1. problem and byte surface;
-2. source/config/package cause;
-3. before and after code/config;
-4. production A/B raw and gzip delta;
-5. affected assets, chunks, modules, and requests;
-6. risks checked;
-7. build, test, and runtime validation.
+- the unchanged and final production scopes;
+- exact raw bytes first and gzip second;
+- the confirmed difference;
+- whether that difference matters for the user's goal;
+- the main reason for the result in one plain sentence.
+
+If several changes were applied, show one unchanged-to-final table and the
+separate production result of each change. Fewer bytes or requests are bundle
+results, not proof of faster loading; name the separately measured performance
+metric before making a performance claim.
+
+## Applied changes (`optimize` only)
+
+For each change, explain:
+
+1. the problem and affected JavaScript;
+2. the source, config, or package behavior that caused it;
+3. the relevant code before and after;
+4. why the new code emits or loads fewer bytes;
+5. the exact production raw/gzip and request result for the affected scope;
+6. the correctness, browser, runtime, compatibility, and agreed project checks
+   that passed.
+
+Do not make the reader infer the change from raw JSON or subtract tables
+manually.
 
 ## Runtime loading and execution
 
 Include this section only when runtime coverage was captured.
 
-Start with plain-language definitions:
+First define the capture in plain language:
 
-- which scenario, repetition, cache policy, ready condition, and interaction
-  window were measured;
-- which page/iframe/worker targets were included;
-- that a zero factory count means "not observed in this scenario", not
-  "unused" or "safe to remove";
-- that generated development factory bytes are diagnostic, not confirmed
-  production savings.
+- page or interaction, cache setting, ready condition, and capture window;
+- runs performed and page, iframe, or worker contexts included;
+- browser errors, failed requests, unstable results, missing data, and fixes
+  attempted;
+- whether exact Chrome protocol coverage or the limited DevTools Coverage
+  panel export was used.
 
-Then give the integrity result: loaded resources versus coverage resources,
-exact source matches, factory-boundary mapping, target coverage, browser
-errors, instability between repetitions, and every unresolved failure with
-its attempted remedy.
+Show each run before the result common to every valid repeated run. If the
+DevTools panel was used, label any mapped module-wrapper result
+`ui-range-inference` rather than precise call-count coverage.
 
-Show per-repetition counts before the stable intersection. When the native
-DevTools Coverage panel was the fallback, say so explicitly and distinguish
-its `ui-range-inference` facts from precise call-count coverage.
+Say explicitly that a zero count for a generated module wrapper means “not
+observed in this scenario,” not “unused” or “safe to remove.” Development or
+`production-debug` wrapper bytes help locate code but are not confirmed
+production savings.
 
-For each material agent-selected item, use:
+For each important runtime item, show:
 
-1. observed resource/chunk/module fact;
-2. browser initiator and Rspack loading cause;
-3. relevant source and consumer code;
-4. concrete before/after change;
-5. why the product does or does not need it at that point;
-6. production raw/gzip/request result;
-7. scenario replay, critical interaction, and risk checks.
+1. what the browser loaded or did not execute;
+2. the network initiator and Rspack loading cause;
+3. the relevant source and consumer;
+4. in `audit-only`, the possible change and checks it would need; in `optimize`,
+   the applied change and why required behavior is preserved;
+5. the unchanged production byte/request facts and, in `optimize`, the measured
+   difference;
+6. the repeated scenario and, when loading changed, the critical-interaction
+   check.
 
-For a deferred-loading result, name the assets removed from first screen and
-show that those same assets returned during the critical interaction. Include
-the relevant source and consumer snippets; do not make the reader navigate
-raw JSON to understand the code change.
+When a deferred-loading change was applied, name the assets removed from first
+screen and show that the same assets load when the required interaction runs.
 
-Do not paste an unexplained table of zero-count factories. Keep complete JSONL
-as backing evidence and write the report for a reader who has not seen the
-capture tooling.
+## Results not applied
 
-## Measured but unapplied
+Keep these separate:
 
-Separate:
+- measured changes that need a user or team decision;
+- limits in a dependency package;
+- unresolved correctness or runtime risk;
+- size estimates from non-production or otherwise non-comparable output.
 
-- policy-dependent results;
-- dependency/upstream-package constraints;
-- runtime or semantic risks;
-- diagnostic-only upper bounds.
+For each item, state the exact decision, fix, or evidence needed before it can
+be applied.
 
-State the exact decision or validation that would clear each one.
+## Changes that did not help
 
-## Rejected hypotheses
+Show the comparable measurement or source evidence that ruled out the expected
+cause or saving.
 
-Record the comparable measurement or source/graph evidence that disproved the
-hypothesis.
+## Remaining large items
 
-## Remaining large surfaces
-
-List the largest unexplained or constrained byte surfaces and the next
-agent action. Do not hide them behind a successful small optimization.
+List the largest unexplained or constrained sources of JavaScript and the next
+action for each. Do not hide them behind a smaller successful change.
 
 ## Evidence
 
 Link or name:
 
-- run manifest;
-- compiler captures;
-- exact asset manifests;
-- baseline and experiment measurements;
+- run and capture manifests;
+- exact asset lists and measurements;
 - source and package locations;
-- build/test commands and results.
+- production build, test, and runtime commands with results.
 
-## Readability review
+## Final readability check
 
-Before delivery, the agent must read the rendered or final report once and
-fix it if:
+Read the report once before delivery. Fix it when:
 
-- a metric appears before its definition or scope;
-- an item lacks its loading cause, source evidence, code change, or reason;
-- a capture/build/test failure lacks the actual error and attempted remedy;
-- diagnostic bytes could be mistaken for confirmed savings;
-- a conclusion cannot be traced to a named evidence artifact.
+- a number appears before its meaning or scope;
+- a result lacks its loading cause, source, or explanation;
+- an applied change is not shown concretely;
+- a failed capture, build, or test lacks the actual error and attempted fix;
+- non-production or non-comparable bytes look like confirmed savings;
+- a conclusion cannot be traced to evidence.
 
-For an HTML report, inspect at least the rendered conclusion, one detailed
-code/change section, the failure section, and a narrow viewport. Fix clipped
-text, unexplained abbreviations, hidden horizontal overflow, or evidence links
-that do not resolve.
+For HTML, also inspect the result, one detailed finding or applied change, the
+failure section, and a narrow viewport. Fix clipped text, unexplained
+abbreviations, horizontal overflow, and broken evidence links.

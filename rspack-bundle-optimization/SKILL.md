@@ -1,111 +1,66 @@
 ---
 name: rspack-bundle-optimization
-description: Agent-driven Rspack, Rsbuild, and Rspeedy bundle auditing and optimization. Use for bundle-size investigations, reductions, reviews, measured reports, or Chrome runtime-coverage analysis of loaded chunks and module factories. Bundled JavaScript may only capture, persist, retrieve, hash, normalize, verify, and measure factual data; the agent must perform all candidate discovery, prioritization, semantic analysis, risk assessment, code changes, and conclusions.
+description: Audit and reduce Rspack, Rsbuild, or Rspeedy bundle size using production build data, source and export-usage analysis, and optional Chrome runtime coverage. Use for bundle-size investigations, implementation, reviews, or measured reports.
 ---
 
 # Rspack Bundle Optimization
 
-Own the bundle investigation from a production baseline to a measured,
-agent-supported conclusion.
+Find why JavaScript is emitted or loaded. When the user requests changes,
+confirm each applied improvement with production output and the checks needed
+for the affected behavior.
 
-## Mode
+## Mode and permission
 
-- Use `audit-only` for analysis, investigation, explanation, review, and
-  report requests.
-- Enter `optimize` only when the user explicitly asks to reduce, optimize,
-  fix, apply, or implement changes.
-- Do not commit, push, publish, change browser support, replace a dependency,
-  or change product behavior unless the request authorizes that action.
+- Use `audit-only` for investigation, explanation, review, and report requests.
+- Use `optimize` only when the user asks to optimize, reduce, fix, apply, or
+  implement.
+- Do not commit, push, publish, replace dependencies, change browser support,
+  or change product behavior without authorization.
 
-## Build And Coverage Modes
+## Build modes
 
-Keep task mode separate from build mode. Use these build modes consistently:
+- `development`: use only for local debugging or tool checks. Do not report its
+  bytes, requests, or coverage as production results.
+- `production`: use the unchanged production configuration to confirm emitted
+  bytes and requests. Claim a performance improvement only after measuring a
+  named performance metric under the same conditions.
+- `production-debug`: start from production, disable JavaScript minimization
+  and `optimization.concatenateModules`, and set `optimization.moduleIds` to
+  `named`. Keep entries, compilation targets, feature flags, splitChunks,
+  dependencies, runtime, and existing production plugins unchanged. The
+  capture plugin in [references/data-capture.md](references/data-capture.md)
+  may also be enabled. Use this mode only to map chunks and generated module
+  wrappers; confirm savings with `production`.
 
-- `development`: the project's ordinary development configuration. Use only
-  for local debugging or capability checks. Do not report its bytes, requests,
-  or coverage as production evidence.
-- `production`: the unchanged production configuration. Use for confirmed
-  emitted-byte, request, and user-facing savings.
-- `production-debug`: production with compression/minimization disabled,
-  `optimization.concatenateModules` disabled, and `optimization.moduleIds`
-  set to `named`; keep every other production entry, feature flag, target,
-  splitChunks, dependency, runtime, and plugin setting unchanged.
+## Tools collect data; the agent decides
 
-Use `production-debug` for Rspack chunk/runtime coverage and source-level
-module-factory analysis. Treat its module and generated-byte facts as
-diagnostic evidence; prove savings with `production`.
+The supplied tools may capture compiler or browser data, save the JavaScript
+passed to Rspack after loaders, link compiler and browser records to source
+modules and emitted assets, verify files, and calculate raw/gzip bytes. They
+must not choose what to inspect, infer source behavior, recommend a change,
+assess risk, or write the conclusion.
 
-## Hard JavaScript Boundary
-
-Bundled JavaScript is a data plane, never an analyst.
-
-JavaScript may only:
-
-- capture facts exposed by the compiler or filesystem;
-- serialize raw stats, graph edges, module/chunk membership, resolved config,
-  and post-loader source;
-- create isolated directories and record commands;
-- hash and verify evidence files;
-- calculate exact raw/gzip bytes and arithmetic deltas;
-- normalize exact browser coverage ranges and map them mechanically to
-  generated Rspack module factories;
-- retrieve a requested captured record or source range;
-- mechanically join a requested set of export-usage edges to captured
-  consumer locations, code snippets, enclosing declarations, and syntax
-  owner chains.
-
-JavaScript must never:
-
-- create, rank, score, accept, reject, or disposition optimization candidates;
-- infer genuine usage, removability, side-effect purity, compatibility, or
-  semantic safety;
-- label a module, export, package, chunk, or source pattern as an opportunity;
-- choose an experiment or propose a code/config/dependency change;
-- turn graph traversal or pattern matching into a root-cause conclusion;
-- decide whether a route, audit, or optimization is complete;
-- generate analytical prose or a final optimization report.
-
-Compiler-provided fields such as `usedExports`, `providedExports`, bailouts,
-reasons, and export-usage edges remain raw facts. Their meaning is decided by
-the agent after reading the surrounding evidence.
-
-Likewise, a browser coverage count of zero means only "not observed in this
-recorded scenario." JavaScript must not rename that fact to "unused",
-"unwanted", "removable", or "safe to defer".
-
-## Agent Responsibilities
-
-The agent must:
-
-1. inspect applicable `AGENTS.md`, project scripts, package manager, actual
-   compiler version, dirty state, browser/runtime policy, and validation
-   commands;
-2. define the production command and explicit asset scopes for total,
-   initial, and important route JavaScript;
-3. capture the unchanged baseline with the bundled data tools;
-4. read the captured data and build its own byte-surface model;
-5. form and prioritize hypotheses, starting with the largest plausible
-   emitted-byte or loading-path impact;
-6. when runtime loading is in scope, define repeatable browser scenarios,
-   capture all relevant targets before navigation, and connect coverage facts
-   to network initiators and compiler graph facts;
-7. inspect source, post-loader source, package metadata, imports, graph
-   connections, chunks, and generated output for each material hypothesis;
-8. in optimize mode, implement and measure narrow changes without handing
-   routine candidate decisions back to the user;
-9. assess runtime, API, browser, dependency, side-effect-order, registration,
-   loading-order, request, cache, CSS, worker, and product-policy risk;
-10. keep agent-authored notes and conclusions under `<run>/notes/`;
-11. write and then review the final report directly from verified evidence.
-
-Read `references/agent-analysis.md` completely before analyzing a captured
-bundle.
+Treat compiler fields such as `usedExports`, `providedExports`, bailouts, and
+export-usage edges as build facts, not decisions about product intent. A
+runtime count of zero means only that execution was not observed in the
+recorded scenario.
 
 ## Workflow
 
-### 1. Create an isolated data run
+### 1. Inspect the project
 
-Use:
+Read applicable `AGENTS.md` files and identify:
+
+- the package manager, production command, actual compiler version, and dirty
+  state;
+- total, initial, and important route JavaScript scopes;
+- browser/runtime requirements and relevant build, test, and runtime checks.
+
+Read the production command before running it. If it can deploy, upload,
+publish, or mutate an external system, isolate the local build step or ask for
+authorization.
+
+### 2. Create a data run
 
 ```bash
 node <skill>/scripts/create-audit-run.cjs \
@@ -115,154 +70,92 @@ node <skill>/scripts/create-audit-run.cjs \
   --asset-scope "<plain-language scope>"
 ```
 
-The tool creates storage and fingerprints. It does not create candidates,
-route states, or conclusions.
+Use a fresh run and output directory. Do not combine files from different run
+ids or overwrite an earlier build.
 
-### 2. Capture the unchanged production build
+### 3. Capture and measure the unchanged build
 
-Read `references/data-capture.md`, then wire
-`scripts/rspack-data-capture-plugin.template.cjs` behind an audit-only
-environment flag.
+Read [references/data-capture.md](references/data-capture.md). In `audit-only`,
+do not change tracked source or config unless the user separately authorizes a
+temporary capture setup. Prefer an existing audit hook or ignored wrapper. If
+neither works, report the missing data or ask for that authorization. Keep
+each top-level compiler in its own capture directory.
 
-Capture each top-level compiler separately with a unique compiler id and
-directory. Refuse stale or overwritten artifacts.
+Read [references/measurement.md](references/measurement.md) and measure the
+exact assets in each relevant scope. Report raw bytes first and gzip second.
 
-### 3. Measure explicit asset scopes
+### 4. Capture browser loading only when needed
 
-Read `references/measurement.md`. Measure total, initial, and important route
-assets separately when those scopes matter. Raw bytes are primary; gzip is
-secondary.
+When the question concerns actual browser requests or execution during a page
+or interaction, read
+[references/runtime-coverage.md](references/runtime-coverage.md) completely.
+Use `production-debug` for source-level mapping and `production` for final byte
+or request comparisons. A static route chunk-group size question uses compiler
+data and does not require browser coverage.
 
-### 4. Capture runtime loading when relevant
+### 5. Analyze the evidence
 
-When the request concerns first-screen or route resources, loaded chunks, or
-code not executed during a scenario, read
-`references/runtime-coverage.md` completely.
+Read [references/agent-analysis.md](references/agent-analysis.md) completely.
+Start with the largest relevant source of initial, route, or total JavaScript.
+For each important item, inspect the complete source on disk, source after
+loaders, package metadata, consumers, graph connections, chunks, and emitted
+output before deciding what it means.
 
-Prefer the official Chrome DevTools MCP server when it is available. Use its
-coverage tools as the primary capture path, together with its exact script
-source, loaded-resource/network, console, navigation, and target facts. If the
-MCP is unavailable or a required coverage/source/network fact is missing,
-record the concrete missing tool or capability and only then use a lower-level
-CDP or Puppeteer fallback. Normalize the raw capture and run the integrity
-verifier. First attempt to solve any capture or mapping failure. If it remains
-unsolved, report its reason and affected scope; do not silently continue with
-a complete-sounding conclusion.
+State how items are selected: include the largest unexplained contributors and
+anything large enough to affect the user's goal. Continue until the remaining
+items are too small to affect that goal or each has a specific documented
+reason it cannot be resolved.
 
-For Rspack chunk/runtime coverage, use `production-debug`. First start a local
-production server, preview server, or serve command for that build, then probe
-the target home page and important APIs. For the real capture, start coverage
-first, then reload or navigate to the home page. If startup, navigation,
-login/session, proxy, API, or asset serving fails, inspect logs and try only
-safe, non-semantic fixes. Ask the user before applying or relying on a fix that
-changes the scenario, product behavior, auth state, API behavior,
-browser-support policy, feature flags, proxy/mocking strategy, or production
-comparability. If the correct fix is unclear, ask the user for help instead of
-inventing a local workaround and treating the capture as valid.
+For important export usage that resolves to a namespace:
 
-Use the built-in Chrome DevTools Coverage panel only when the live MCP tool
-list lacks required coverage/source capability, or when the MCP coverage
-command fails and the exact error is recorded. Treat the panel export as the
-explicitly degraded fallback described in the reference; do not mislabel its
-used ranges as precise call counts. A stable first-screen production A/B uses
-three separate repetitions for baseline and candidate, followed by the
-critical interaction that must load deferred code.
+1. find every source `import()` that creates the namespace;
+2. inspect the original source before Babel or SWC lowers `await import()`;
+3. combine export names from every property read, destructuring statement,
+   alias, helper call, and downstream consumer;
+4. do not guess a list when non-literal computed keys, rest/spread, enumeration,
+   reflection, re-export, or unresolved namespace passing remains;
+5. once every reachable consumer has been resolved and the complete export-name
+   list is known, record the proposed comment without editing in `audit-only`;
+6. in `optimize`, add `import(/* rspackExports: ["foo"] */ "pkg")`, then
+   confirm in source after loaders that the dynamic `import()` and comment
+   still reach Rspack before capturing export usage and output again.
 
-Runtime coverage is conditional evidence. Do not run it merely to add a
-metric when the user asks only about emitted production bytes.
+The detailed rules and destructuring example are in
+[references/agent-analysis.md](references/agent-analysis.md#dynamic-imports-used-as-namespaces).
 
-### 5. Agent analysis
+### 6. Make and check changes
 
-The agent analyzes the raw capture. It must not treat module/source size,
-`usedExports=[]`, a bailout, namespace use, a Rollup result, or a source
-pattern as removable bytes without source inspection and a
-production-comparable experiment.
+In `optimize` mode:
 
-Start with high-impact surfaces instead of exhausting tiny rows first. Keep
-the complete backing data, but prioritize agent work by plausible product
-impact and evidence quality.
+- change one thing at a time and use a fresh output directory;
+- keep unrelated entries, dependencies, feature flags, minimization,
+  concatenation, splitChunks, and runtime settings unchanged;
+- compare the same total, initial, and route asset scopes before and after;
+- inspect the emitted diff and run the checks required by the affected code;
+- keep a change as a confirmed saving only when the production output improves
+  for the intended reason and no required correctness, compatibility, or team
+  check remains.
 
-When runtime facts exist, the agent must determine why each material asset
-loaded and whether the observed product scenario actually wants the retained
-feature. A zero-count factory alone is not an optimization conclusion.
+### 7. Finish and report
 
-For high-impact `usedExports` or export-usage questions, run
-`scripts/extract-export-usage-context.cjs` with a narrow provider/export
-filter. Read every returned consumer snippet, complete top-level owner, nested
-owner chain, importing boundary, and then the complete source. The script
-only exposes syntax facts. The agent decides whether the consumption is
-product-intended, accidentally eager, registration-only, feature-gated, or
-otherwise optimizable. Resolve any missing location, source match, parser, or
-owner failure first; if it remains unresolved, retain the exact reason and
-affected edge count in the report.
+In `audit-only`, use the unchanged production build as the final measurement
+when it can be captured. Otherwise, state what prevented the measurement. Do
+not claim a confirmed saving. Finish when the important sources are explained,
+missing data is named, and proposed changes are clearly marked as unmeasured.
 
-### 6. Experiments and edits
+In `optimize`, measure the final production build again. Finish when one of
+these statements is supported:
 
-In optimize mode:
+- the important safe changes were applied and checked, with no larger
+  in-scope item left unexamined;
+- the remaining important items are blocked by a named risk, a user or team
+  decision, or a dependency change, and the report states what would unblock
+  them;
+- required data could not be captured after a concrete attempt, and the report
+  clearly marks the affected conclusion as incomplete.
 
-- change one hypothesis at a time;
-- use a fresh experiment output;
-- hold entries, dependencies, feature flags, minimization, concatenation, and
-  splitChunks constant except for the intended variable;
-- compare exact asset scopes;
-- inspect the output diff and run relevant tests/runtime checks;
-- apply only changes supported by the evidence and authorized policy.
-
-Small positive deltas may be retained when the change is worthwhile, but they
-do not prove that the bundle has no larger opportunity.
-
-### 7. Fixed point
-
-After applying changes, capture a fresh production baseline. Finish only when
-the agent can support one of these conclusions:
-
-- material safe opportunities were applied and validated, and no larger
-  in-scope hypothesis remains unexamined;
-- the remaining material opportunities have concrete risk, policy, or
-  upstream-package constraints and a clearing condition;
-- required factual data cannot be captured after a concrete attempt, in which
-  case the report is explicitly incomplete.
-
-No JavaScript validator decides this state.
-
-## Measurement Rules
-
-- Headline emitted JavaScript raw bytes; show gzip second.
-- Keep total emitted, initial, and route-level scopes separate.
-- Preserve the exact included-asset list for every measurement.
-- Count only production-comparable A/B output as confirmed savings.
-- Keep source size, stats module size, diagnostic potential, and predicted
-  attribution separate from confirmed emitted-byte deltas.
-- Never reuse production `dist`, overwrite an experiment, or combine
-  artifacts from different run ids.
-
-## Safety Gate
-
-An optimization may be promoted only when:
-
-- the agent explains the source/config/package cause;
-- a production-comparable A/B proves the relevant improvement;
-- the output change matches the intended transformation;
-- no unresolved in-scope correctness or policy risk remains;
-- the production build and relevant tests or runtime smoke checks pass.
-
-The agent must state what was checked. Never claim absolute zero risk.
-
-## Delivery
-
-Read `references/report-template.md`. The agent writes the final Markdown or
-requested document directly. A report renderer is not part of this skill.
-
-The report must separate:
-
-- confirmed applied savings;
-- measured but unapplied results;
-- diagnostic upper bounds;
-- rejected experiments;
-- blocked or policy-dependent opportunities;
-- remaining high-impact actions.
-
-When runtime coverage was used, include its scenario, target, source-mapping,
-failure, loading-cause, and replay evidence. Review the finished report once
-for readability and correct any unexplained metric, missing failure reason,
-or diagnostic byte count that could be mistaken for confirmed savings.
+Read [references/report-template.md](references/report-template.md). Separate
+confirmed applied savings, measured but unapplied results, estimates from
+non-production or otherwise non-comparable builds, changes that did not help,
+blocked items, and remaining actions.
+State what was checked and never claim absolute zero risk.

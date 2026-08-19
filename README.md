@@ -1,95 +1,56 @@
 # Rspack Bundle Optimization Skill
 
-An agent-driven skill for auditing and optimizing Rspack, Rsbuild, and
-Rspeedy bundles.
+A Codex skill for finding and reducing JavaScript emitted or loaded by Rspack,
+Rsbuild, and Rspeedy projects.
 
-The repository deliberately keeps JavaScript tooling small. Bundled scripts
-may capture compiler facts, persist evidence, read captured source, and
-measure emitted bytes. They must not rank opportunities, infer semantic
-usage, decide purity, recommend changes, assign risk, or write the analysis
-for the agent.
+## How it works
 
-## Responsibility boundary
+The bundled scripts record compiler data, the JavaScript Rspack receives after
+Babel, SWC, and other loaders, browser request and execution coverage, and
+exact raw/gzip bytes. They only collect facts. The agent decides what should
+change and, when changes are requested, verifies any savings in a production
+build.
 
-### JavaScript tools
+The workflow is:
 
-- capture resolved Rspack configuration, stats, module/chunk relationships,
-  export-usage edges, and post-loader source;
-- normalize Chrome/V8 precise-coverage ranges into factual loaded-script and
-  generated module-factory records;
-- create an isolated run and fingerprint evidence;
-- measure exact raw and deterministic gzip bytes;
-- compare two measurements without interpreting the delta;
-- retrieve captured source on demand;
-- mechanically join requested export-usage edges to their post-loader
-  locations, bounded snippets, enclosing declarations, and syntax-owner
-  chains.
+1. identify the real production command, compiler version, and JavaScript
+   scopes to measure;
+2. capture the unchanged build in a fresh data run;
+3. inspect the largest relevant sources of total, initial, or route JavaScript;
+4. when changes are requested, make one focused change at a time;
+5. compare the same production scopes before and after, then run the required
+   correctness checks;
+6. for analysis only, report the unchanged build and unmeasured suggestions;
+   after edits, measure the final build and separate confirmed changes, changes
+   that did not help, blocked items, and remaining work.
 
-### Agent
+Runtime coverage is optional. Use it only when the question concerns what a
+page or interaction loads or executes.
 
-- identify the largest byte surfaces;
-- form and rank optimization hypotheses;
-- inspect graph, source, package metadata, and generated output;
-- distinguish real usage from mechanical retention;
-- connect runtime coverage to network initiators, chunk loading causes,
-  complete source, required scenarios, and product intent;
-- design and implement source/config/dependency changes;
-- judge semantic and product risk;
-- run production-comparable experiments and tests;
-- author the final report and decide whether the audit reached a supported
-  fixed point.
+## Contents
 
-## Core workflow
+- `rspack-bundle-optimization/SKILL.md`: mode selection and main workflow.
+- `references/data-capture.md`: capture-plugin setup and output files.
+- `references/measurement.md`: exact asset measurement and comparison.
+- `references/agent-analysis.md`: source, chunk, export-usage, namespace, and
+  completion checks.
+- `references/runtime-coverage.md`: Chrome/V8 capture, mapping, and replay.
+- `references/report-template.md`: final report structure.
 
-1. Inspect the project, production command, compiler version, dirty state,
-   supported browsers, and validation commands.
-2. Create an isolated data run.
-3. Capture an unchanged production baseline and exact asset measurements.
-4. Let the agent analyze the captured facts, starting with the largest
-   initial/route/total byte surfaces.
-5. In optimize mode, test one agent-authored hypothesis at a time.
-6. Apply only measured, source-backed changes whose relevant risks have been
-   checked.
-7. Capture a fresh final baseline and let the agent write the report.
+Scripts:
 
-## Scripts
-
-```text
-scripts/
-├── create-audit-run.cjs
-├── rspack-data-capture-plugin.template.cjs
-├── measure-assets.cjs
-├── read-capture.cjs
-├── extract-export-usage-context.cjs
-├── normalize-runtime-coverage.cjs
-└── verify-runtime-coverage-artifacts.cjs
-```
-
-- `create-audit-run.cjs`: creates a run, records commands and artifact
-  fingerprints, and verifies that recorded evidence has not changed.
-- `rspack-data-capture-plugin.template.cjs`: captures raw compiler facts from
-  a successful compilation.
-- `measure-assets.cjs`: records exact raw/gzip asset data and mechanically
-  compares two measurements.
-- `read-capture.cjs`: lists or prints captured post-loader source without
-  classifying it.
-- `extract-export-usage-context.cjs`: joins filtered raw export-usage edges to
-  every captured consumer location and mechanically extracts snippets and
-  enclosing syntax owners. Missing locations, source ambiguity, parser
-  failures, and truncated owner source remain explicit failures for the
-  agent.
-- `normalize-runtime-coverage.cjs`: maps exact Chrome/V8 script facts to
-  generated Rspack module-factory facts without deciding what is unwanted.
-- `verify-runtime-coverage-artifacts.cjs`: checks source, target, timing,
-  arithmetic, and artifact integrity and reports concrete failures.
-
-See:
-
-- `references/data-capture.md`
-- `references/agent-analysis.md`
-- `references/measurement.md`
-- `references/runtime-coverage.md`
-- `references/report-template.md`
+- `create-audit-run.cjs`: creates a run and records file fingerprints.
+- `rspack-data-capture-plugin.template.cjs`: captures compiler, graph,
+  chunk, export-usage, and source data.
+- `measure-assets.cjs`: measures exact raw/gzip bytes and compares two
+  measurements.
+- `read-capture.cjs`: lists or reads captured source.
+- `extract-export-usage-context.cjs`: joins export-usage edges to source
+  locations and containing code.
+- `normalize-runtime-coverage.cjs`: maps exact Chrome/V8 coverage to
+  generated wrappers around Rspack modules.
+- `verify-runtime-coverage-artifacts.cjs`: checks runtime-capture files for
+  missing or inconsistent data.
 
 ## Install
 
@@ -98,7 +59,7 @@ npx skills add JSerFeng/rspack-bundle-size-optimization-skills \
   --skill rspack-bundle-optimization
 ```
 
-Add `--global` only when a global installation is intended.
+Add `--global` only for a global installation.
 
 ## License
 
