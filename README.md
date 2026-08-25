@@ -7,9 +7,8 @@ Rsbuild, and Rspeedy projects.
 
 The bundled scripts record compiler data, the JavaScript Rspack receives after
 Babel, SWC, and other loaders, browser request and execution coverage, and
-exact raw/gzip bytes. They only collect facts. The agent decides what should
-change and, when changes are requested, verifies any savings in a production
-build.
+exact raw/gzip bytes. The agent connects that evidence to source and product
+behavior and verifies requested savings in a production build.
 
 The workflow is:
 
@@ -20,9 +19,8 @@ The workflow is:
 4. when changes are requested, make one focused change at a time;
 5. compare the same production scopes before and after, then run the required
    correctness checks;
-6. for analysis only, report the unchanged build and unmeasured suggestions;
-   after edits, measure the final build and separate confirmed changes, changes
-   that did not help, blocked items, and remaining work.
+6. lead the report with comparable production results, accepted changes,
+   material open decisions, and the evidence needed for remaining work.
 
 Runtime coverage is optional. Use it only when the question concerns what a
 page or interaction loads or executes.
@@ -32,8 +30,11 @@ page or interaction loads or executes.
 - `rspack-bundle-optimization/SKILL.md`: mode selection and main workflow.
 - `references/data-capture.md`: capture-plugin setup and output files.
 - `references/measurement.md`: exact asset measurement and comparison.
-- `references/agent-analysis.md`: source, chunk, export-usage, namespace, and
+- `references/agent-analysis.md`: shared source, chunk, export-usage, and
   completion checks.
+- `references/dynamic-imports.md`: dynamic-import grouping, magic comments,
+  and namespace export lists.
+- `references/ecmascript-target.md`: ECMAScript/browser target comparisons.
 - `references/runtime-coverage.md`: Chrome/V8 capture, mapping, and replay.
 - `references/report-template.md`: final report structure.
 

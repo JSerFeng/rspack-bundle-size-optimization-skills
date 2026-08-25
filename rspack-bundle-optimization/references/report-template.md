@@ -1,105 +1,81 @@
 # Report Template
 
-Write the report for a reader who has not seen the capture tools. Link the
-evidence, but explain the source and result in the report itself.
+Write for a reader who has not seen the capture tools. Lead with the result and
+include only evidence that supports a decision, explains a material cause, or
+defines remaining work.
 
 ## Result
 
-For an `audit-only` report, state:
+For `audit-only`, state:
 
-- the unchanged production scopes, with exact raw bytes first and gzip second;
-- the largest explained sources and any important unexplained remainder;
-- missing data or checks that limit the conclusion;
-- proposed changes, clearly marked as not applied and not measured.
+- unchanged production measurements for each requested scope, raw first and
+  gzip second;
+- the largest explained contributors and material unexplained remainder;
+- evidence gaps that limit a conclusion;
+- proposed changes labeled unapplied and unmeasured.
 
-Do not invent a difference or confirmed saving for an audit-only run.
+For `optimize`, state:
 
-For an `optimize` report, state:
+- unchanged and final production measurements for identical scopes;
+- exact raw and gzip difference;
+- whether the result meets the user's goal;
+- the principal source-level cause in one sentence.
 
-- the unchanged and final production scopes;
-- exact raw bytes first and gzip second;
-- the confirmed difference;
-- whether that difference matters for the user's goal;
-- the main reason for the result in one plain sentence.
+When several changes are accepted, show one unchanged-to-final table plus the
+production effect of each isolated experiment. Present bundle bytes, requests,
+and named performance metrics as separate results.
 
-If several changes were applied, show one unchanged-to-final table and the
-separate production result of each change. Fewer bytes or requests are bundle
-results, not proof of faster loading; name the separately measured performance
-metric before making a performance claim.
+## Applied changes
 
-## Applied changes (`optimize` only)
+For each accepted change, explain:
 
-For each change, explain:
-
-1. the problem and affected JavaScript;
-2. the source, config, or package behavior that caused it;
-3. the relevant code before and after;
-4. why the new code emits or loads fewer bytes;
-5. the exact production raw/gzip and request result for the affected scope;
-6. the correctness, browser, runtime, compatibility, and agreed project checks
-   that passed.
-
-Do not make the reader infer the change from raw JSON or subtract tables
-manually.
+1. affected JavaScript and loading or emission cause;
+2. relevant source, configuration, or package behavior;
+3. concrete code or configuration change;
+4. why the emitted or requested output changed;
+5. production raw/gzip and request result for the affected scope;
+6. correctness, runtime, browser, compatibility, and project checks that
+   apply to the changed behavior.
 
 ## Runtime loading and execution
 
-Include this section only when runtime coverage was captured.
+Include this section when runtime coverage contributed to the conclusion.
+Define the page or interaction, cache setting, ready condition, capture window,
+repetitions, included targets, browser errors, failed requests, and coverage
+method.
 
-First define the capture in plain language:
+Show each repetition, then identify results common to all valid runs. Label a
+DevTools Coverage-panel mapping `ui-range-inference`. Interpret zero-count
+generated wrappers as unobserved in the named scenario and use production
+request or asset differences for confirmed loading results.
 
-- page or interaction, cache setting, ready condition, and capture window;
-- runs performed and page, iframe, or worker contexts included;
-- browser errors, failed requests, unstable results, missing data, and fixes
-  attempted;
-- whether exact Chrome protocol coverage or the limited DevTools Coverage
-  panel export was used.
+For each material runtime finding, report:
 
-Show each run before the result common to every valid repeated run. If the
-DevTools panel was used, label any mapped module-wrapper result
-`ui-range-inference` rather than precise call-count coverage.
+1. observed browser result;
+2. network and Rspack loading cause;
+3. relevant source and consumer;
+4. proposal or applied change;
+5. production byte/request measurement;
+6. repeated scenario and critical-interaction check.
 
-Say explicitly that a zero count for a generated module wrapper means “not
-observed in this scenario,” not “unused” or “safe to remove.” Development or
-`production-debug` wrapper bytes help locate code but are not confirmed
-production savings.
+For deferred loading, identify assets removed from first screen and show their
+on-demand loading during the required interaction.
 
-For each important runtime item, show:
+## Open decisions
 
-1. what the browser loaded or did not execute;
-2. the network initiator and Rspack loading cause;
-3. the relevant source and consumer;
-4. in `audit-only`, the possible change and checks it would need; in `optimize`,
-   the applied change and why required behavior is preserved;
-5. the unchanged production byte/request facts and, in `optimize`, the measured
-   difference;
-6. the repeated scenario and, when loading changed, the critical-interaction
-   check.
+Include material unapplied findings that require a user or team decision,
+dependency work, compatibility choice, runtime evidence, or correctness proof.
+For each, state the potential scope and the exact decision or evidence needed.
 
-When a deferred-loading change was applied, name the assets removed from first
-screen and show that the same assets load when the required interaction runs.
+Mention a rejected hypothesis or failed experiment only when its evidence
+changes the recommended action or prevents likely duplicate investigation.
+Summarize it in one sentence with the decisive measurement or source fact.
 
-## Results not applied
+## Remaining material items
 
-Keep these separate:
-
-- measured changes that need a user or team decision;
-- limits in a dependency package;
-- unresolved correctness or runtime risk;
-- size estimates from non-production or otherwise non-comparable output.
-
-For each item, state the exact decision, fix, or evidence needed before it can
-be applied.
-
-## Changes that did not help
-
-Show the comparable measurement or source evidence that ruled out the expected
-cause or saving.
-
-## Remaining large items
-
-List the largest unexplained or constrained sources of JavaScript and the next
-action for each. Do not hide them behind a smaller successful change.
+List material unexplained or constrained sources and one concrete next action
+for each. Relate their importance to the user's requested scope rather than
+enumerating every small contributor.
 
 ## Evidence
 
@@ -110,17 +86,9 @@ Link or name:
 - source and package locations;
 - production build, test, and runtime commands with results.
 
-## Final readability check
+## Final check
 
-Read the report once before delivery. Fix it when:
-
-- a number appears before its meaning or scope;
-- a result lacks its loading cause, source, or explanation;
-- an applied change is not shown concretely;
-- a failed capture, build, or test lacks the actual error and attempted fix;
-- non-production or non-comparable bytes look like confirmed savings;
-- a conclusion cannot be traced to evidence.
-
-For HTML, also inspect the result, one detailed finding or applied change, the
-failure section, and a narrow viewport. Fix clipped text, unexplained
-abbreviations, horizontal overflow, and broken evidence links.
+Every reported number has a named scope and unit; every accepted change has a
+cause, comparable result, and relevant check; every limitation identifies its
+affected conclusion. For HTML output, inspect representative findings and a
+narrow viewport for readable layout and working evidence links.

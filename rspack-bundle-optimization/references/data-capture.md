@@ -1,25 +1,17 @@
 # Data Capture
 
-Use the capture plugin for compiler data that cannot be reconstructed reliably
-from source files or final assets alone. The plugin records data; it does not
-recommend or rank changes.
+Use the capture plugin for compiler facts that source files and final assets
+cannot reconstruct reliably.
 
 ## Set up the capture
 
-Each capture needs:
+Give every run a unique run id and every top-level compiler its own id and
+fresh directory. Keep web, node, worker, and other compiler records separate
+and use the real production command and environment.
 
-- a run id;
-- a unique id for each top-level compiler;
-- a fresh directory inside that run;
-- the real production command and environment.
-
-Keep web, node, worker, and other top-level compilers in separate directories.
-Do not merge their records.
-
-In `audit-only`, do not change tracked source or config unless the user
-separately authorizes a temporary capture setup. Prefer an existing audit hook
-or an ignored wrapper. If neither works, report the missing data or ask for
-that authorization.
+In `audit-only`, attach capture through an existing audit hook or ignored
+wrapper. A tracked capture integration belongs to `optimize` or separate user
+authorization.
 
 Add `scripts/rspack-data-capture-plugin.template.cjs` at the final Rspack
 configuration hook:
@@ -45,33 +37,30 @@ if (process.env.RSPACK_BUNDLE_CAPTURE === "1") {
 ```
 
 For Rsbuild or another framework, use its final Rspack-config hook. Pass the
-already imported `rspack` object when capturing export usage; loading a second
-compiler instance can produce incompatible graph data.
+compiler instance already used by the build; export-usage graph objects must
+come from that same instance.
 
-The capture setup—the plugin and any wrapper used to inject it—must be the only
-temporary build change and must not alter normal entries, chunks, or assets.
-Before delivery, disable its environment flag and remove any temporary wrapper;
-verify that no audit setup enters the normal production build or the requested
-source diff.
+The capture integration changes only evidence collection. Keep normal entries,
+chunks, assets, and production settings stable. Disable the environment flag
+and remove temporary ignored wrappers before delivery.
 
 ## Output files
 
-- `compilation-data.json`: resolved config, raw Stats JSON, assets, modules,
-  export states, chunks, groups, entrypoints, and connections.
-- `export-usage.json`: raw Rsdoctor modules and export-usage edges when the
-  compiler supports them.
-- `post-loader-sources.jsonl`: complete `module.originalSource()` text after
-  loaders; this is the source Rspack parses.
+- `compilation-data.json`: resolved config, Stats data, assets, modules, export
+  states, chunks, groups, entrypoints, and connections.
+- `export-usage.json`: raw Rsdoctor modules and export-usage edges when
+  supported by the executing compiler.
+- `post-loader-sources.jsonl`: complete `module.originalSource()` text received
+  by Rspack after loaders.
 - `post-loader-index.json`: source lookup data and hashes.
 - `capture-manifest.json`: output sizes and hashes.
 
-A failed production build does not produce a complete capture. Existing output
-files are never overwritten.
+A complete capture comes from a successful production build. The tools use
+fresh output paths and preserve earlier evidence. When export-usage data is
+unavailable, record the gap; `requireExportUsage:true` makes that field a
+required capture result.
 
-If Rsdoctor export-usage data is unavailable, record that gap. Fail the build
-for it only when `requireExportUsage:true` was requested.
-
-## Read the data
+## Read compiler data
 
 ```bash
 jq '.assets' <capture>/compilation-data.json
@@ -87,8 +76,8 @@ node <skill>/scripts/read-capture.cjs \
   --source "package/path.js"
 ```
 
-These commands expose build facts. Read the importing source, package metadata,
-graph connection, and emitted output before drawing a conclusion.
+Connect these records to importing source, package metadata, graph edges, and
+emitted output during analysis.
 
 ## Read export-usage context
 
@@ -101,21 +90,15 @@ node <skill>/scripts/extract-export-usage-context.cjs \
   --out <run>/notes/export-context.json
 ```
 
-Rspack records edges as `consumer -> provider`. The script keeps every matched
-edge and location, adds a short source excerpt, includes the complete top-level
-function, variable, or export containing the use, and shows the path through
-nested functions or callbacks.
+Rspack records edges as `consumer -> provider`. The script retains every
+matched edge and location, adds source context and containing declarations,
+and shows nested callback ownership. Filter by provider or export; use
+`--max-matches` explicitly when a wider result is intentional.
 
-Always filter by provider or export. The script refuses an unfiltered graph and
-does not silently truncate matches; narrow the filters or raise
-`--max-matches` explicitly.
+The script resolves `@babel/parser` from the audited package. Pass
+`--project-root` when capture metadata cannot identify it. A nonzero exit and
+`complete:false` identify missing or ambiguous source, locations, parser
+results, or containing code; carry that gap into the affected conclusion.
 
-The script loads `@babel/parser` from the audited package. Pass
-`--project-root` when the capture does not identify that package. Missing or
-ambiguous source, invalid locations, parser recovery, and missing containing
-code make the result `complete:false` and exit nonzero. Treat those as missing
-data, not as proof that no usage exists.
-
-For browser coverage, final module ids, concatenation membership, and chunk
-files connect compiler data to generated code. Continue with
-[runtime-coverage.md](runtime-coverage.md).
+For browser coverage, connect final module ids, concatenation membership, and
+chunk files using [runtime-coverage.md](runtime-coverage.md).
