@@ -1,4 +1,4 @@
 interface:
   display_name: "Rspack Bundle Optimization"
   short_description: "Measured Rspack bundle analysis and reduction"
-  default_prompt: "Use $rspack-bundle-optimization to explain this project's relevant JavaScript and verify requested reductions with comparable production measurements."
+  default_prompt: "Use $rspack-bundle-optimization to exhaust applicable optimization families, apply measured wins, pass the completion gate, and report the result in plain language."

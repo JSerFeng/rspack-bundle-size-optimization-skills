@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Create an isolated data run and fingerprint recorded evidence.
-// This tool stores facts only. It has no candidate, verdict, or completion model.
+// audit-state.cjs owns candidate coverage, verdicts, and the completion gate.
 
 const {
   existsSync,
@@ -17,8 +17,9 @@ const { createHash, randomBytes } = require('crypto');
 const { spawnSync } = require('child_process');
 const { isAbsolute, relative, resolve, sep } = require('path');
 const { tmpdir } = require('os');
+const { FAMILY_DEFINITIONS, initializeState } = require('./audit-state.cjs');
 
-const RUN_SUBDIRS = ['baseline', 'captures', 'experiments', 'notes'];
+const RUN_SUBDIRS = ['baseline', 'captures', 'experiments', 'final', 'notes'];
 
 function parseArgs(argv) {
   const values = { _: [] };
@@ -194,6 +195,14 @@ function readManifest(runDir) {
 
 function createRun(args) {
   const projectRoot = canonical(args['project-root'] || process.cwd());
+  const mode = String(args.mode || 'audit-only');
+  const coverage = String(args.coverage || 'comprehensive');
+  if (!['audit-only', 'optimize'].includes(mode)) {
+    throw new Error(`Unsupported audit mode: ${mode}`);
+  }
+  if (!['comprehensive', 'targeted'].includes(coverage)) {
+    throw new Error(`Unsupported coverage policy: ${coverage}`);
+  }
   const root = chooseRunRoot(
     projectRoot,
     args.root,
@@ -218,6 +227,9 @@ function createRun(args) {
     runDir,
     buildCommand: args['build-command'] || null,
     assetScope: args['asset-scope'] || null,
+    mode,
+    coverage,
+    goal: args.goal || args['asset-scope'] || null,
     git: gitInfo(projectRoot),
     runtime: {
       node: process.version,
@@ -230,6 +242,14 @@ function createRun(args) {
     resolve(runDir, 'manifest.json'),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  initializeState({
+    runDir,
+    runId,
+    projectRoot,
+    mode,
+    coverage,
+    goal: manifest.goal,
+  });
   return manifest;
 }
 
@@ -304,9 +324,12 @@ function verifyRun(args) {
     );
   }
   return {
+    kind: 'rspack-bundle-evidence-verification',
     runId: manifest.runId,
     artifactCount: checks.length,
     verified: checks.length,
+    evidenceIntegrity: 'verified',
+    auditCompletion: 'not-evaluated',
   };
 }
 
@@ -323,6 +346,13 @@ function selfTest() {
       'asset-scope': 'fixture JavaScript',
     });
     const artifact = resolve(manifest.runDir, 'baseline', 'measurement.json');
+    const state = JSON.parse(
+      readFileSync(resolve(manifest.runDir, 'audit-state.json'), 'utf8'),
+    );
+    assert.equal(state.kind, 'rspack-bundle-audit-state');
+    assert.equal(state.mode, 'audit-only');
+    assert.equal(state.coverage, 'comprehensive');
+    assert.equal(state.families.length, FAMILY_DEFINITIONS.length);
     writeFileSync(artifact, '{"raw":10}\n');
     recordCommand({
       'run-dir': manifest.runDir,
@@ -332,6 +362,7 @@ function selfTest() {
     });
     const verification = verifyRun({ 'run-dir': manifest.runDir });
     assert.equal(verification.verified, 1);
+    assert.equal(verification.auditCompletion, 'not-evaluated');
     assert.throws(
       () => resolveInsideRun(manifest.runDir, '../outside'),
       /must stay inside/,

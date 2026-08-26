@@ -1,94 +1,157 @@
-# Report Template
+# 普通用户报告模板
 
-Write for a reader who has not seen the capture tools. Lead with the result and
-include only evidence that supports a decision, explains a material cause, or
-defines remaining work.
+报告分成“用户正文”和“技术附录”。用户正文是默认交付物，读者不需要知道 Rspack
+内部结构；技术附录只服务于复核和继续开发。不要把分析过程、工具输出或术语清单当成报告。
 
-## Result
+## 1. 状态标题
 
-For `audit-only`, state:
+标题必须与 completion gate 一致：
 
-- unchanged production measurements for each requested scope, raw first and
-  gzip second;
-- the largest explained contributors and material unexplained remainder;
-- evidence gaps that limit a conclusion;
-- proposed changes labeled unapplied and unmeasured.
+- `status: complete`：`包体积优化已完成`
+- `status: incomplete`：`包体积优化部分完成` 或 `包体积优化尚未完成`
 
-For `optimize`, state:
+`audit-only` 没有修改授权时，标题写 `包体积分析已完成`，不能写“优化完成”。
 
-- unchanged and final production measurements for identical scopes;
-- exact raw and gzip difference;
-- whether the result meets the user's goal;
-- the principal source-level cause in one sentence.
+标题下第一段不超过五句话，直接回答：
 
-When several changes are accepted, show one unchanged-to-final table plus the
-production effect of each isolated experiment. Present bundle bytes, requests,
-and named performance metrics as separate results.
+1. 是否完成；
+2. 最重要 scope 的 before → after；
+3. 真正落地了几项修改；
+4. 是否还有未落地事项；
+5. 用户是否需要决定什么。
 
-## Applied changes
+示例：
 
-For each accepted change, explain:
+> 本次优化已完成。生产环境总 JS 从 128.4 MiB 降至 123.2 MiB，减少 5.2 MiB
+>（4.1%）；HTML 首次请求的 JS 从 608 KiB 降至 606 KiB，减少 2 KiB。
+> 共落地 3 项修改，另有 2 项因兼容风险保留。当前不需要额外决策。
 
-1. affected JavaScript and loading or emission cause;
-2. relevant source, configuration, or package behavior;
-3. concrete code or configuration change;
-4. why the emitted or requested output changed;
-5. production raw/gzip and request result for the affected scope;
-6. correctness, runtime, browser, compatibility, and project checks that
-   apply to the changed behavior.
+如果 completion gate 是 `incomplete`，第一句必须明确未完成，不能先展示局部收益制造
+“已经结束”的印象。
 
-## Runtime loading and execution
+## 2. 最终结果
 
-Include this section when runtime coverage contributed to the conclusion.
-Define the page or interaction, cache setting, ready condition, capture window,
-repetitions, included targets, browser errors, failed requests, and coverage
-method.
+只展示用户关心的 scope。raw JS 在前，gzip 在后；总产物、初始加载、路由加载和性能
+指标分开，不合并成一个“综合收益”。
 
-Show each repetition, then identify results common to all valid runs. Label a
-DevTools Coverage-panel mapping `ui-range-inference`. Interpret zero-count
-generated wrappers as unobserved in the named scenario and use production
-request or asset differences for confirmed loading results.
+| 范围 | 修改前 | 修改后 | 变化 | 对用户意味着什么 |
+| --- | ---: | ---: | ---: | --- |
+| 总 JS（raw） | 128.4 MiB | 123.2 MiB | -5.2 MiB / -4.1% | 构建产物总量减少，不等于首屏下载 |
+| 总 JS（gzip） | 38.1 MiB | 36.5 MiB | -1.6 MiB / -4.2% | 全部 JS 压缩总量减少，首屏影响另看 |
+| HTML 初始 JS（gzip） | 608 KiB | 606 KiB | -2 KiB / -0.3% | 首屏传输量变化很小 |
 
-For each material runtime finding, report:
+规则：
 
-1. observed browser result;
-2. network and Rspack loading cause;
-3. relevant source and consumer;
-4. proposal or applied change;
-5. production byte/request measurement;
-6. repeated scenario and critical-interaction check.
+- 同时给出绝对值和百分比，不只写百分比；
+- 使用 KiB/MiB 等易读单位，技术附录再保留精确 bytes；
+- 请求数、FCP、TTU 没测就写“未测”，不能从体积变化推断；
+- `audit-only` 只展示 unchanged baseline 和发现，不制造 before/after；
+- scope 不可比时不计算 delta，写明为什么不可比。
 
-For deferred loading, identify assets removed from first screen and show their
-on-demand loading during the required interaction.
+## 3. 真正落地的修改
 
-## Open decisions
+每项修改使用相同的五行结构，保持问题与收益一一对应：
 
-Include material unapplied findings that require a user or team decision,
-dependency work, compatibility choice, runtime evidence, or correctness proof.
-For each, state the potential scope and the exact decision or evidence needed.
+### 修改名称
 
-Mention a rejected hypothesis or failed experiment only when its evidence
-changes the recommended action or prevents likely duplicate investigation.
-Summarize it in one sentence with the decisive measurement or source fact.
+- **原来的问题：** 用普通语言描述为什么多加载或多生成了代码。
+- **实际修改：** 指出改动的文件和行为，不贴大段源码。
+- **实际收益：** 写该项独立 production A/B 的 raw、gzip，以及适用的请求结果。
+- **为什么有效：** 一句话解释代码与产物变化的因果关系。
+- **验证：** 列出 production build 和最相关的测试或交互检查结果。
 
-## Remaining material items
+只有 candidate 状态为 `applied` 才能进入本节。实验目录里的修改、预测收益、源码大小、
+debug build、浏览器目标上限都不能写成“已落地收益”。
 
-List material unexplained or constrained sources and one concrete next action
-for each. Relate their importance to the user's requested scope rather than
-enumerating every small contributor.
+## 4. 没有落地的事项
 
-## Evidence
+把 material candidate 按用户能行动的方式列出：
 
-Link or name:
+| 事项 | 状态 | 为什么没有改 | 下一步或需要的决定 |
+| --- | --- | --- | --- |
+| 某依赖仍为 CommonJS | 有风险 | 改写可能改变初始化顺序 | 依赖负责人确认 API 和副作用 |
+| 某路由覆盖率采集失败 | 被阻塞 | Worker target 未被采集 | 修复采集后重跑指定场景 |
 
-- run and capture manifests;
-- exact asset lists and measurements;
-- source and package locations;
-- production build, test, and runtime commands with results.
+状态翻译：
 
-## Final check
+- `keep`：经过检查，当前应该保留；
+- `rejected`：实际没有收益或假设不成立；
+- `risk-found`：有潜在收益，但存在具体风险；
+- `blocked`：缺少证据，报告整体必须是 `incomplete`；
+- `proposed-unmeasured`：仅用于分析模式，尚未修改和测量；
+- `validated-opportunity`：分析模式已测得收益，但没有修改授权。
 
-Every reported number has a named scope and unit; every accepted change has a
-cause, comparable result, and relevant check; every limitation identifies its
-affected conclusion. For HTML output, inspect representative findings and a
-narrow viewport for readable layout and working evidence links.
+不需要把每个很小的 `keep` 都塞进正文。正文展示 material 项；完整候选 ledger 放技术附录。
+
+## 5. 用户需要决定什么
+
+只列真正需要产品、兼容性、依赖升级或额外权限决策的事项。每项包括：
+
+- 如果同意，预计影响哪个 scope；
+- 具体风险是什么；
+- 需要谁确认或提供什么；
+- 确认后执行的下一步。
+
+没有需要用户决定的事项时，直接写“当前不需要额外决策”，不要补充泛化建议。
+
+## 正文语言规则
+
+正文避免以下内部术语：
+
+`usedExports`、`providedExports`、`chunk graph`、`module wrapper`、`post-loader`、
+`capture manifest`、`run id`、`SHA-256`、`parser recovery`。
+
+确实必须提及时，先翻译成用户结果。例如不要写：
+
+> `usedExports` 显示 namespace edge 导致 provider retained。
+
+改写为：
+
+> 这个文件以“导入整个模块”的方式使用依赖，导致未使用的功能也进入了产物。
+
+删除以下内容：
+
+- “我们首先……然后……”式过程流水账；
+- 没有数据支撑的“显著优化”“大幅提升”；
+- 重复解释同一结论；
+- 与用户目标无关的工具、schema 和文件列表；
+- 通用 bundle 优化教程和下一步畅想。
+
+## 6. 技术附录
+
+用户正文结束后再提供，可折叠或单独保存。包括：
+
+### 完成校验
+
+- completion gate 的 `runId`、`status`、family/candidate/applied/issue 计数；
+- `incomplete` 时逐项列出 validator issues；
+- evidence integrity 结果不能替代 completion status。
+
+### 精确测量
+
+- 每个 scope 的精确 raw bytes、gzip bytes、asset count；
+- inclusion manifest、baseline/final measurement 和 comparison；
+- initial、async、total、browser-observed scope 分开。
+
+### 候选覆盖
+
+- 十个优化类别的发现数、实际 candidate 数、终态、summary 和 evidence；
+- 每个 candidate 的终态；
+- `risk-found` 的失败模式和解除条件；
+- blocker 的尝试命令、错误、缺失前置和下一条命令。
+
+### 实现与验证
+
+- 每个 applied candidate 的 changed files 和 patch；
+- isolated comparison 与 final comparison；
+- production build、test、runtime、typecheck、lint 等命令和结果；
+- source、package、compiler、runtime 证据路径。
+
+## 交付前检查
+
+- 第一屏只看状态、数字、已改内容和未完成事项，也能理解结论；
+- 每项“已落地”都能追溯到实际项目修改和最终 production measurement；
+- raw/gzip、initial/total、bundle/performance 没有混为一谈；
+- `incomplete` 没有被包装成“基本完成”；
+- 技术细节没有挤进普通用户正文；
+- 没有黑话、过程复述或无证据的形容词。

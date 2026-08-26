@@ -20,8 +20,10 @@ third-party, runtime, helper, polyfill, duplicated, and unmapped code.
 Common high-impact causes include eager features, broad imports, duplicate
 package versions, production registration or debug code, CommonJS boundaries,
 merged dynamic-import groups, transform helpers, locales, icons, polyfills,
-CSS, WASM, and workers. Choose from project evidence rather than following
-this list as a checklist.
+CSS, WASM, and workers. Treat the families in `audit-state.json` as coverage
+requirements: inspect each family, then use project evidence to decide whether
+it has candidates, is not applicable, or is blocked. This example list is not
+an exhaustive candidate list and must not replace the coverage matrix.
 
 ## Trace runtime loading
 
@@ -41,7 +43,8 @@ matching production asset or request difference to confirm a loading saving.
 
 ## Keep decision notes
 
-Store concise notes for each material finding under `<run>/notes/`:
+Store concise notes for each material finding under `<run>/notes/`, fingerprint
+them in `manifest.json`, and reference them from `audit-state.json`:
 
 - affected scope, assets, chunks, modules, packages, and import sites;
 - evidence files and source locations;
@@ -101,7 +104,13 @@ For each experiment:
 
 ## Complete the analysis
 
-Finish with the material JavaScript sources examined, accepted or proposed
-changes, comparable measurements, relevant checks, evidence gaps, and concrete
-next decisions. Keep the conclusion centered on the user's goal and make any
-material unexplained remainder visible.
+Do not decide completion in prose. Update every family and candidate in
+`audit-state.json`, record final production evidence, then run
+`scripts/audit-state.cjs validate`. Continue runnable work while the result is
+`incomplete`. A genuine blocker remains visible in the user report with its
+exact unblock action.
+
+The final report covers the material JavaScript sources examined, applied or
+proposed changes, comparable measurements, relevant checks, evidence gaps, and
+concrete next decisions. Keep the conclusion centered on the user's goal and
+make any material unexplained remainder visible.

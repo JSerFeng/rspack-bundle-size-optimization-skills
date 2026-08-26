@@ -7,20 +7,23 @@ Rsbuild, and Rspeedy projects.
 
 The bundled scripts record compiler data, the JavaScript Rspack receives after
 Babel, SWC, and other loaders, browser request and execution coverage, and
-exact raw/gzip bytes. The agent connects that evidence to source and product
-behavior and verifies requested savings in a production build.
+exact raw/gzip bytes. A persistent audit state requires evidence for every
+optimization family and candidate. The agent may say the work is complete only
+after the deterministic completion gate verifies the final project files,
+production builds, measurements, comparisons, and correctness checks.
 
 The workflow is:
 
 1. identify the real production command, compiler version, and JavaScript
    scopes to measure;
 2. capture the unchanged build in a fresh data run;
-3. inspect the largest relevant sources of total, initial, or route JavaScript;
-4. when changes are requested, make one focused change at a time;
-5. compare the same production scopes before and after, then run the required
-   correctness checks;
-6. lead the report with comparable production results, accepted changes,
-   material open decisions, and the evidence needed for remaining work.
+3. evaluate every applicable optimization family and give every discovered
+   candidate an evidence-backed terminal disposition;
+4. when changes are requested, make and measure one focused change at a time;
+5. apply safe positive candidates to the real project, rebuild the final state,
+   and bind its files to final measurements and correctness checks;
+6. pass the completion gate, then lead with a plain-language user report and
+   keep compiler internals in a technical appendix.
 
 Runtime coverage is optional. Use it only when the question concerns what a
 page or interaction loads or executes.
@@ -30,6 +33,8 @@ page or interaction loads or executes.
 - `rspack-bundle-optimization/SKILL.md`: mode selection and main workflow.
 - `references/data-capture.md`: capture-plugin setup and output files.
 - `references/measurement.md`: exact asset measurement and comparison.
+- `references/completion-contract.md`: coverage matrix, candidate states, and
+  the deterministic completion requirements.
 - `references/agent-analysis.md`: shared source, chunk, export-usage, and
   completion checks.
 - `references/dynamic-imports.md`: dynamic-import grouping, magic comments,
@@ -40,7 +45,10 @@ page or interaction loads or executes.
 
 Scripts:
 
-- `create-audit-run.cjs`: creates a run and records file fingerprints.
+- `create-audit-run.cjs`: creates a run, initializes `audit-state.json`, and
+  records file fingerprints.
+- `audit-state.cjs`: snapshots the applied project state and rejects incomplete
+  coverage, unapplied safe candidates, stale evidence, or unbound final output.
 - `rspack-data-capture-plugin.template.cjs`: captures compiler, graph,
   chunk, export-usage, and source data.
 - `measure-assets.cjs`: measures exact raw/gzip bytes and compares two
