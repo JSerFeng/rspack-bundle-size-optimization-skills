@@ -4,13 +4,7 @@
 
 ## 配置抓取
 
-为每次审计运行分配唯一的运行 ID，并为每个顶层编译器分配独立 ID 和全新目录。将 web、
-node、worker 和其他编译器记录相互隔离，并使用真实的生产命令和环境。
-
-在 `audit-only` 模式中，通过现有审计钩子或被忽略的包装文件接入抓取逻辑。受版本控制的
-抓取集成只能用于 `optimize` 模式，或在用户另行授权后使用。
-
-在最终的 Rspack 配置钩子中引入
+在最终的 Rspack 配置 hook 中引入
 `scripts/rspack-data-capture-plugin.template.cjs`：
 
 ```js
@@ -32,12 +26,6 @@ if (process.env.RSPACK_BUNDLE_CAPTURE === "1") {
   );
 }
 ```
-
-对于 Rsbuild 或其他框架，应使用其最终 Rspack 配置钩子。传入构建实际使用的编译器实例；
-export usage 图对象必须来自同一个实例。
-
-抓取集成只能改变证据收集方式。保持正常入口、chunk、资源和生产设置不变。交付前关闭环境
-变量开关，并删除临时且被忽略的包装文件。
 
 ## 输出文件
 

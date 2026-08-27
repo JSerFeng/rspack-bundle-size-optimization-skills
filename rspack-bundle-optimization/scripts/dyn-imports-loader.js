@@ -6,10 +6,20 @@
  * 导出集合时，才插入 `rspackExports` 魔法注释。无法证明的普通用法保持原样；可能让最终
  * 产物错误裁剪导出的情况会直接终止构建，而不是静默跳过。
  *
+ * 支持的主要消费形态：
+ * - `await import()` 后直接读取成员、绑定 namespace 后读取静态成员，或进行对象解构；
+ * - `import().then()` 的单参数箭头回调，包括 namespace 成员读取和参数解构；
+ * - `await Promise.all([import(), ...])` 直接绑定到数组 pattern，并按输入/结果槽位逐一推断。
+ *
+ * 一旦同一 namespace 除静态成员读取外还作为完整对象使用，就对该 import() 安全 bailout，
+ * 保持源码原样。直接 `eval`、普通 `function` 形式的 `.then()` 回调，以及无法验证的手写导出
+ * 注释属于最终产物安全边界，会 fail closed 并终止模块构建。
+ *
  * 接入约束：
  * - 作为 `enforce: 'pre'` loader 使用，确保看到转换前的原始 `import()`；
  * - 默认只处理一方源码，不要未经源码和副作用审查直接覆盖 `node_modules`；
- * - 依赖从 loader 选项 `dependencyRoot`、同名环境变量、脚本目录或当前目录解析；
+ * - 依赖从 loader 选项 `dependencyRoot`、环境变量
+ *   `RSPACK_DYN_IMPORTS_LOADER_DEPENDENCY_ROOT`、脚本目录或当前目录解析；
  * - 自动修改只代表语法投影成立，真实包体积收益仍需生产构建 A/B 确认。
  */
 'use strict';
@@ -96,6 +106,8 @@ function loadRuntimeDependencies(explicitRoot) {
       `指向包含 package.json 的目录。\n尝试记录：\n${failures.map((item) => `- ${item}`).join('\n')}`,
   );
 }
+
+// ── AST 基础设施与解析配置 ──────────────────────────────────────────────────
 
 function isAstNode(value) {
   return Boolean(value && typeof value === 'object' && typeof value.type === 'string');
@@ -202,6 +214,8 @@ function getStaticPropertyName(property) {
 function unique(values) {
   return [...new Set(values)];
 }
+
+// ── 动态导入的导出使用推断 ──────────────────────────────────────────────────
 
 function exportsFromObjectPattern(pattern) {
   const exports = [];
@@ -680,6 +694,8 @@ function magicCommentRange(sourceBuffer, callExpression, fileSpanStart) {
   return { start, end, text: sourceBuffer.subarray(start, end).toString('utf8') };
 }
 
+// ── 现有魔法注释的解析与 fail-closed 校验 ────────────────────────────────────
+
 function extractExistingExportsExpression(text) {
   const matches = [...text.matchAll(/\b(?:rspack|webpack)Exports\s*:/g)];
   if (matches.length !== 1) {
@@ -816,6 +832,8 @@ function createSafetyError(resourcePath, records) {
       .join('\n')}`,
   );
 }
+
+// ── 注释写入与 source map 合成 ──────────────────────────────────────────────
 
 function serializeMagicCommentExport(name) {
   // 块注释遇到第一段原始 `*/` 就会结束，即使它看起来位于字符串内也一样。只编码其中的
@@ -983,6 +1001,8 @@ function transformSource(source, resourcePath = 'unknown.ts', options = {}) {
     changed: insertions.length > 0,
   };
 }
+
+// ── Rspack loader 与可选事实报告插件 ────────────────────────────────────────
 
 function rspackExportsLoader(source, inputSourceMap, meta) {
   this.cacheable?.(true);

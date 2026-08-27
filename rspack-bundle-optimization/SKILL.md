@@ -1,6 +1,6 @@
 ---
 name: rspack-bundle-optimization
-description: Optimization JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeedy. Use for bundle-size audits, optimization changes, measured reports, tree-shaking, splitChunks, dependency duplication, ECMAScript targets, or browser runtime-loading analysis. Broad requests require evidence for every optimization family; never claim completion unless the audit-state completion gate returns complete.
+description: Optimization JavaScript emitted or loaded by Rspack or Rsbuild. Use for bundle-size audits, optimization changes, measured reports, tree-shaking, splitChunks, ECMAScript targets, or browser runtime-loading analysis. 
 ---
 
 # Rspack Bundle Optimization
@@ -69,12 +69,7 @@ build 与至少一个 production measurement，完成校验必然失败。
 结果。为同一 scope 生成新的 final measurement 和 comparison，并写入 `audit-state.json`。
 
 保存每个 `applied` candidate 的 patch、修改文件、独立 comparison、final comparison 和
-正确性 check id。随后执行：
-
-```bash
-node <skill>/scripts/audit-state.cjs snapshot-final --run-dir <run>
-node <skill>/scripts/audit-state.cjs validate --run-dir <run>
-```
+正确性 check id。
 
 ### 7. 写给普通用户的报告
 

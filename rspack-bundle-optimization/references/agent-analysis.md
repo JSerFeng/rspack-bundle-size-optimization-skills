@@ -56,5 +56,5 @@ node <skill>/scripts/extract-export-usage-context.cjs \
 
 通过将 swc-loader 或 babel-loader 的 target 配置成最新的 ecma 版本（需要注意如果配置了 env，swc-loader 会忽略 target），然后执行一次正常的构建，构建后查看体积是否明显降低，如果降幅明显，则继续检查是否有 module 数量的降低，因为更高级别的 ecma 等级可能让某些语法不再被 bundler 视为有副作用。如果发现 module 数量有降低，则记录下所有减少的 module，然后通过上一步的 export 和源码信息分析是什么语法降级导致优化没有了。
 
-其中最有可能发生的是 dynamic import 的优化失效，见 [references/dynamic-imports.md](references/dynamic-imports.md)。
-
+其中最有可能发生的是 dynamic import 的优化失效，见
+[references/dynamic-imports.md](dynamic-imports.md)。
