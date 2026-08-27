@@ -49,13 +49,6 @@ build 与至少一个 production measurement，完成校验必然失败。
 
 以下情况按需读取专门参考：
 
-- dynamic import、magic comment、namespace export：
-  [references/dynamic-imports.md](references/dynamic-imports.md)
-- ECMAScript target、transform helper、polyfill：
-  [references/ecmascript-target.md](references/ecmascript-target.md)
-- 页面、路由、交互实际加载或执行：完整阅读
-  [references/runtime-coverage.md](references/runtime-coverage.md)
-
 ### 5. 逐个验证并真正应用
 
 `optimize` 中每个候选项使用独立输出目录，同时满足以下条件才能写成 `applied`：
@@ -68,6 +61,7 @@ build 与至少一个 production measurement，完成校验必然失败。
 
 安全且测得正向收益的候选必须应用。不能应用时，必须使用 `keep`、`rejected`、
 `risk-found` 或 `blocked`，并写具体证据。
+
 
 ### 6. 基于最终代码重新测量
 

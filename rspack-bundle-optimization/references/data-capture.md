@@ -1,20 +1,17 @@
-# Data Capture
+# 数据抓取
 
-Use the capture plugin for compiler facts that source files and final assets
-cannot reconstruct reliably.
+当源码和最终资源无法可靠还原编译器事实时，使用抓取插件记录这些事实。
 
-## Set up the capture
+## 配置抓取
 
-Give every run a unique run id and every top-level compiler its own id and
-fresh directory. Keep web, node, worker, and other compiler records separate
-and use the real production command and environment.
+为每次审计运行分配唯一的运行 ID，并为每个顶层编译器分配独立 ID 和全新目录。将 web、
+node、worker 和其他编译器记录相互隔离，并使用真实的生产命令和环境。
 
-In `audit-only`, attach capture through an existing audit hook or ignored
-wrapper. A tracked capture integration belongs to `optimize` or separate user
-authorization.
+在 `audit-only` 模式中，通过现有审计钩子或被忽略的包装文件接入抓取逻辑。受版本控制的
+抓取集成只能用于 `optimize` 模式，或在用户另行授权后使用。
 
-Add `scripts/rspack-data-capture-plugin.template.cjs` at the final Rspack
-configuration hook:
+在最终的 Rspack 配置钩子中引入
+`scripts/rspack-data-capture-plugin.template.cjs`：
 
 ```js
 const {
@@ -36,31 +33,28 @@ if (process.env.RSPACK_BUNDLE_CAPTURE === "1") {
 }
 ```
 
-For Rsbuild or another framework, use its final Rspack-config hook. Pass the
-compiler instance already used by the build; export-usage graph objects must
-come from that same instance.
+对于 Rsbuild 或其他框架，应使用其最终 Rspack 配置钩子。传入构建实际使用的编译器实例；
+export usage 图对象必须来自同一个实例。
 
-The capture integration changes only evidence collection. Keep normal entries,
-chunks, assets, and production settings stable. Disable the environment flag
-and remove temporary ignored wrappers before delivery.
+抓取集成只能改变证据收集方式。保持正常入口、chunk、资源和生产设置不变。交付前关闭环境
+变量开关，并删除临时且被忽略的包装文件。
 
-## Output files
+## 输出文件
 
-- `compilation-data.json`: resolved config, Stats data, assets, modules, export
-  states, chunks, groups, entrypoints, and connections.
-- `export-usage.json`: raw Rsdoctor modules and export-usage edges when
-  supported by the executing compiler.
-- `post-loader-sources.jsonl`: complete `module.originalSource()` text received
-  by Rspack after loaders.
-- `post-loader-index.json`: source lookup data and hashes.
-- `capture-manifest.json`: output sizes and hashes.
+- `compilation-data.json`：解析后的配置、Stats 数据、资源、模块、导出状态、chunk、
+  chunk group、入口点和连接；
+- `export-usage.json`：执行构建的编译器支持时，记录原始 Rsdoctor 模块和 export usage
+  边；
+- `post-loader-sources.jsonl`：Rspack 在 loader 处理后通过
+  `module.originalSource()` 接收到的完整文本；
+- `post-loader-index.json`：源码查询数据和哈希；
+- `capture-manifest.json`：输出大小和哈希。
 
-A complete capture comes from a successful production build. The tools use
-fresh output paths and preserve earlier evidence. When export-usage data is
-unavailable, record the gap; `requireExportUsage:true` makes that field a
-required capture result.
+完整抓取必须来自成功的生产构建。工具使用全新的输出路径，并保留先前证据。无法获取
+export usage 数据时，应记录该缺口；`requireExportUsage:true` 会把此字段设为必需的抓取
+结果。
 
-## Read compiler data
+## 读取编译器数据
 
 ```bash
 jq '.assets' <capture>/compilation-data.json
@@ -76,10 +70,9 @@ node <skill>/scripts/read-capture.cjs \
   --source "package/path.js"
 ```
 
-Connect these records to importing source, package metadata, graph edges, and
-emitted output during analysis.
+分析时，将这些记录与导入方源码、包元数据、图中的边以及输出产物关联起来。
 
-## Read export-usage context
+## 读取 export usage 上下文
 
 ```bash
 node <skill>/scripts/extract-export-usage-context.cjs \
@@ -90,15 +83,14 @@ node <skill>/scripts/extract-export-usage-context.cjs \
   --out <run>/notes/export-context.json
 ```
 
-Rspack records edges as `consumer -> provider`. The script retains every
-matched edge and location, adds source context and containing declarations,
-and shows nested callback ownership. Filter by provider or export; use
-`--max-matches` explicitly when a wider result is intentional.
+Rspack 按 `consumer -> provider` 方向记录边。脚本会保留每一条匹配边及其位置，补充源码
+上下文和所属声明，并展示嵌套回调的归属关系。按提供方或导出项筛选；只有确实希望扩大结果
+范围时，才显式使用 `--max-matches`。
 
-The script resolves `@babel/parser` from the audited package. Pass
-`--project-root` when capture metadata cannot identify it. A nonzero exit and
-`complete:false` identify missing or ambiguous source, locations, parser
-results, or containing code; carry that gap into the affected conclusion.
+脚本从被审计的包中解析 `@babel/parser`。如果抓取元数据无法确定包根目录，请传入
+`--project-root`。非零退出码和 `complete:false` 表示源码、位置、解析结果或所属代码缺失
+或不明确；必须把该证据缺口带入受影响的结论。
 
-For browser coverage, connect final module ids, concatenation membership, and
-chunk files using [runtime-coverage.md](runtime-coverage.md).
+进行浏览器覆盖率分析时，按照
+[runtime-coverage.md](runtime-coverage.md) 将最终模块 ID、模块拼接关系和 chunk 文件关联
+起来。

@@ -1,4 +1,4 @@
 interface:
-  display_name: "Rspack Bundle Optimization"
-  short_description: "Measured Rspack bundle analysis and reduction"
-  default_prompt: "Use $rspack-bundle-optimization to exhaust applicable optimization families, apply measured wins, pass the completion gate, and report the result in plain language."
+  display_name: "Rspack 包体积优化"
+  short_description: "基于生产构建实测证据的 Rspack 包体积分析与缩减"
+  default_prompt: "使用 $rspack-bundle-optimization 完整检查所有适用的优化类别，应用经测量有效的优化，通过完成校验，并用通俗语言报告结果。"
