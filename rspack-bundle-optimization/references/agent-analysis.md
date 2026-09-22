@@ -15,42 +15,18 @@
 
 这个是编译时分析的，真实情况还需要参考下面的 coverage 检查。
 
-## 通过追踪运行时的 coverage 来检查未使用代码
+## 分析 export usage
 
-按照 [runtime-coverage.md](runtime-coverage.md#校验采集结果) 校验运行时产物。对每个重要的
-已加载资源或生成的模块包装函数，建立以下关联：
+通过 rspack 内置的 RsdoctorPlugin 对外暴露的 export usage graph 数据分析产物导出，按照导出影响面范围排序依次分析，将影响面大的模块全部分析完。Rspack 目前缺乏一些分析能力，通过源码 https://github.com/web-infra-dev/rspack/ 的 inner_graph 和 side effect plugin 章节确定可以优化的语法和不能优化的语法。
 
-1. 浏览器 URL 和网络请求发起方；
-2. 对应的输出资源、chunk、chunk group、入口或异步根节点；
-3. 对应的 splitChunks 规则，可以通过 chunk.chunkReason 查到；
-4. 发起导入的模块及源码中的加载边界；
-5. 完整的模块源码和使用方源码；
+除了通用的分析外，可以关注下很多导出往往是因为误判有副作用，或是被 loader transform 后变成无法分析的产物，例如 polyfill 后的 await import() 等等 polyfill 后的 syntax。
+观察是否有些导出的使用来自上游打包器对 `export * as ns from '@pkg'` 等 namespace 语义的提前物化。Rollup 可能生成 `Object.freeze({ __proto__: null, foo, bar })`，esbuild 可能生成结构化 export helper 加 getter map；Rspack 此时看到的是普通运行时对象，并且 Rspack 没有对象 tree shaking 能力，会导致整个包被使用，这种情况尝试获取该包的源码，从源码中引入对应导出也许有帮助。
 
-分析网页的首屏 url，然后打开页面执行，分析每一个 chunk 运行后 coverage，判断是否有 module 完全未执行而依然存在于首屏。如果发现则列出，并且列出是为什么在首屏，很有可能是 splitChunks name 配置或 webpackChunkName 导致与其他 chunk modules 进行了聚合。
+查看是否有模块是纯因为 side effects 而被引入，这种模块的 exports 都没有被 used 或者 used unknown，这种模块也许可以完全删除。
 
-## 检查使用的所有导出
+所有的分析要结合真实 export usage graph 的数据，数据会提供某模块的导出所有上游的分支，某个export fn被上游class用到，而上游 class 又被 上游实例化，都可以通过这个数据得知。分析的时候是直接去分析该模块的源码，分析 export 是否真的确实被导出。
 
-对于重要的提供方或导出项，提取每一条匹配边：
-
-```bash
-node <skill>/scripts/extract-export-usage-context.cjs \
-  --dir <capture> \
-  --project-root <audited-package-root> \
-  --target "provider/package/path.js" \
-  --export "exportName" \
-  --out <run>/notes/export-context.json
-```
-
-分析该 export usage graph，其中包含了每一个 module 每一个 export 的传播路径。按照影响范围排序，优先处理影响范围大的 export，影响范围定义为：该 export 造成多少 module 数量被判定为使用因此被打包进产物。
-
-分析副作用和导出使用情况时，应查看完整的磁盘源码、loader 处理后的源码（可以从 rspack 插件中获取到）、使用方源码以及
-最近的 `package.json`。重点关注顶层调用、赋值、语法降级后造成了副作用、worker 初始化、仅为执行副作用的导入。分析出该 export 被使用到底是因为真的是用户实现所必需的，还是因为降级或其他原因意外导致被使用的。
-
-然后再重点查看由 namespace 使用引入的 module，很多时候都是因为语法降级，polyfill 等原因被视为使用。Rspack 支持 `export * from '@pkg'` 的优化，重导出能找到 root 使用的是什么导出，从而优化，但如果 barrel file 中还同时包含 `export * from 'unknown-exports-module'`，其中 `unknonw-exports-module` 的 exports type 是 unknown，那么这种情况难以优化，会造成 @pkg 的 namespace 被视为使用到。
-
-还要重点观察没有任何导出被使用，但仍然存在产物中的，这部分很大概率是由于被判定成了包含副作用，重点检查这部分包的描述文件（package.json）中是否包含了 esm 和 cjs 两个入口，以及 sideEffects 是否写对。
-
-总之 Export usage graph 是优化重点，要每一条都真的通过源码和转换后的源码分析。
+分析出有未使用的被误判时，想办法解决，例如 `@__PURE__` `@__NO_SIDE_EFFECTS__` 或者 `pure_functions` 等等，如果没有合适的办法解决，也想办法验证解决后的收益。
 
 ## 语法降级造成的优化效果不佳
 
