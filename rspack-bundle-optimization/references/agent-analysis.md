@@ -34,3 +34,5 @@
 
 其中最有可能发生的是 dynamic import 的优化失效，见
 [references/dynamic-imports.md](dynamic-imports.md)。
+
+调查完原因后，恢复 target 版本，想办法优化调查出来的 module。
