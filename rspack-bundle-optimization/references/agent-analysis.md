@@ -4,7 +4,7 @@
 
 使用 [measurement.md](measurement.md) 中的统计范围定义。
 
-在 Rspack 配置中加入优化需要的数据收集插件，见 [data-capture](data-capture.md)。
+按项目需要编写并接入数据收集插件，见 [data-capture](data-capture.md)。
 逐个执行所有在下面列出的优化检查项目，必须全部项目都执行，如果有失败则尝试修复后重试，如果仍然失败则记录失败原因：
 
 ## 检查 Chunk 是否包含非必要 Module
@@ -13,7 +13,8 @@
 
 找出所有 unused modules 加载，随后分析是 splitChunks name 或 `webpackChunkName` 导致的还是其他，然后优化可以通过去掉对应的 name / `webpackChunkName` 来尝试优化的收益。
 
-这个是编译时分析的，真实情况还需要参考下面的 coverage 检查。
+这是编译时分析；需要确认页面实际加载和执行情况时，按
+[数据抓取中的浏览器运行数据说明](data-capture.md#浏览器运行数据按需) 补充验证。
 
 ## 分析 export usage
 
@@ -32,5 +33,10 @@
 
 通过将 swc-loader 或 babel-loader 的 target 配置成最新的 ecma 版本（需要注意如果配置了 env，swc-loader 会忽略 target），然后执行一次正常的构建，构建后查看体积是否明显降低，如果降幅明显，则继续检查是否有 module 数量的降低，因为更高级别的 ecma 等级可能让某些语法不再被 bundler 视为有副作用。如果发现 module 数量有降低，则记录下所有减少的 module，然后通过上一步的 export 和源码信息分析是什么语法降级导致优化没有了。
 
-其中最有可能发生的是 dynamic import 的优化失效，见
-[references/dynamic-imports.md](dynamic-imports.md)。
+重点检查 dynamic import：比较转换前后 `import()` 结果的消费方式，确认 namespace
+成员读取是否变成编译器无法识别的普通对象访问。根据当前版本支持的语法或导出提示，
+优先尝试局部源码修改；需要批量处理时，再由 agent 编写适合当前项目的 loader。
+只有能确认完整使用的导出集合时才添加导出限制，namespace 作为完整对象传递或动态取值
+时不能仅凭局部读取推断。对转换后的代码验证行为，并通过生产 A/B 构建确认收益。
+
+提高 target 的实验用于定位原因，最终修改仍须满足项目实际支持的运行环境。

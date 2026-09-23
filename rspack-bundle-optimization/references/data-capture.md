@@ -1,84 +1,38 @@
 # 数据抓取
 
-当源码和最终资源无法可靠还原编译器事实时，使用抓取插件记录这些事实。
+当源码和最终资源无法可靠还原编译器事实时，由 agent 根据当前 Rspack 版本编写临时
+采集插件。接入项目最终的 Rspack 配置 hook，只收集当前分析需要的数据。
 
-## 配置抓取
+## 编译器事实
 
-在最终的 Rspack 配置 hook 中引入
-`scripts/rspack-data-capture-plugin.template.cjs`：
+按问题选择需要记录的内容：
 
-```js
-const {
-  RspackBundleDataCapturePlugin,
-} = require("<skill>/scripts/rspack-data-capture-plugin.template.cjs");
+- 生效配置、Stats、资源清单和入口点；
+- 模块标识、依赖边、导出使用状态，以及模块与 chunk 的对应关系；
+- chunk group 的 chunks、origins 和父子关系；
+- 当前版本支持时，通过 RsdoctorPlugin 获取原始 export usage graph；
+- loader 处理后的完整源码，例如通过 `module.originalSource()` 获取 Rspack 实际接收的文本。
 
-if (process.env.RSPACK_BUNDLE_CAPTURE === "1") {
-  config.plugins ||= [];
-  config.plugins.push(
-    new RspackBundleDataCapturePlugin({
-      rspack,
-      runId: process.env.RSPACK_BUNDLE_RUN_ID,
-      compilerId: "web",
-      outDir: process.env.RSPACK_BUNDLE_CAPTURE_DIR,
-      captureExportUsage: true,
-      captureSources: true,
-    }),
-  );
-}
-```
+先检查项目安装版本的 API 和数据结构，再实现插件。源码记录必须能与图中的模块和位置
+对应；模块拼接时保留内部模块关系。无法取得的数据应说明缺口，不把缺失值解释为未使用。
 
-## 输出文件
+完整抓取必须来自成功的生产构建。每次构建和每个 compiler 使用独立目录，记录构建命令、
+版本、项目状态及数据来源。输出格式和文件名按本次任务选择，保证能关联和复查即可。
 
-- `compilation-data.json`：解析后的配置、Stats 数据、资源、模块、导出状态、chunk、
-  chunk group、入口点和连接；
-- `export-usage.json`：执行构建的编译器支持时，记录原始 Rsdoctor 模块和 export usage
-  边；
-- `post-loader-sources.jsonl`：Rspack 在 loader 处理后通过
-  `module.originalSource()` 接收到的完整文本；
-- `post-loader-index.json`：源码查询数据和哈希；
-- `capture-manifest.json`：输出大小和哈希。
+## 导出使用与源码上下文
 
-完整抓取必须来自成功的生产构建。工具使用全新的输出路径，并保留先前证据。无法获取
-export usage 数据时，应记录该缺口；`requireExportUsage:true` 会把此字段设为必需的抓取
-结果。
+把 export usage 的 `consumer -> provider` 边关联到消费方的 loader 后源码。
+按提供方模块或导出名称筛选引用，保留所有匹配分支及位置，再定位所属函数、类和嵌套回调。
+需要语法归属时，按项目语法选择解析器并编写查询脚本。
 
-## 读取编译器数据
+分析时结合导入方源码、包元数据、图中的边和输出产物。位置与源码不匹配、源码缺失或解析
+不完整时，记录受影响的结论；不要仅根据导出名或原始业务源码猜测引用关系。
 
-```bash
-jq '.assets' <capture>/compilation-data.json
+## 浏览器运行数据（按需）
 
-jq '.modules[] | select(.usedExports == [])' \
-  <capture>/compilation-data.json
+用户关心页面或交互实际加载、执行的代码时，再采集浏览器网络请求和 Chrome/V8 精确覆盖率。
+记录页面、操作步骤、采集时机和目标范围；分析首屏时应在导航前启动采集。
 
-jq '.chunks[] | {id, name, files, modules}' \
-  <capture>/compilation-data.json
-
-node <skill>/scripts/read-capture.cjs \
-  --dir <capture> \
-  --source "package/path.js"
-```
-
-分析时，将这些记录与导入方源码、包元数据、图中的边以及输出产物关联起来。
-
-## 读取 export usage 上下文
-
-```bash
-node <skill>/scripts/extract-export-usage-context.cjs \
-  --dir <capture> \
-  --project-root <audited-package-root> \
-  --target "provider/package/path.js" \
-  --export "exportName" \
-  --out <run>/notes/export-context.json
-```
-
-Rspack 按 `consumer -> provider` 方向记录边。脚本会保留每一条匹配边及其位置，补充源码
-上下文和所属声明，并展示嵌套回调的归属关系。按提供方或导出项筛选；只有确实希望扩大结果
-范围时，才显式使用 `--max-matches`。
-
-脚本从被审计的包中解析 `@babel/parser`。如果抓取元数据无法确定包根目录，请传入
-`--project-root`。非零退出码和 `complete:false` 表示源码、位置、解析结果或所属代码缺失
-或不明确；必须把该证据缺口带入受影响的结论。
-
-进行浏览器覆盖率分析时，按照
-[runtime-coverage.md](runtime-coverage.md) 将最终模块 ID、模块拼接关系和 chunk 文件关联
-起来。
+按需编写处理工具，将覆盖率关联到浏览器实际执行的同一份脚本文本，再结合 chunk 文件、
+最终模块 ID 和模块拼接关系定位模块。检查脚本、采集目标和映射是否缺失或不一致，说明
+无法映射的范围。一次操作中未执行的代码不能直接视为可删除代码。

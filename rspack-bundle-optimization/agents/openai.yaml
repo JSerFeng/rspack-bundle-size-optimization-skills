@@ -1,4 +1,4 @@
 interface:
   display_name: "Rspack 包体积优化"
   short_description: "基于生产构建实测证据的 Rspack 包体积分析与缩减"
-  default_prompt: "使用 $rspack-bundle-optimization 完整检查所有适用的优化类别，应用经测量有效的优化，通过完成校验，并用通俗语言报告结果。"
+  default_prompt: "使用 $rspack-bundle-optimization 完整检查所有适用的优化类别，按项目需要编写工具，应用经测量有效的优化，验证最终生产构建，并用通俗语言报告结果。"
