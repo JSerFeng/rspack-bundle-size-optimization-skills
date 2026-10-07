@@ -1,0 +1,11 @@
+{
+  "name": "rspack-usage-query",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local, on-demand queries over a Rspack export usage snapshot",
+  "engines": { "node": ">=22.13.0" },
+  "dependencies": {
+    "@babel/parser": "7.28.4",
+    "@jridgewell/trace-mapping": "0.3.31"
+  }
+}

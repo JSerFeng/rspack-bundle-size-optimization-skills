@@ -5,11 +5,16 @@ Rsbuild, and Rspeedy projects.
 
 ## How it works
 
-The skill provides analysis guidance without bundled scripts. The agent writes
-temporary scripts or plugins as needed for the project's compiler version and
-the question being investigated, using existing project tools where suitable.
-Tools may collect compiler data, inspect the JavaScript after loaders, measure
-exact raw/gzip bytes, or analyze browser request and execution coverage.
+The skill includes a local export-usage capture plugin and an agent-facing JSON
+query CLI. Capture a production build once, then search modules, page through
+exports and references, trace bounded importer graphs, or load the source and AST
+ownership for a single reference. SQLite indexes keep normal queries independent
+of the full graph and source payloads. Mapping gaps and coordinate ambiguity are
+returned explicitly. See the [query guide](rspack-bundle-optimization/references/usage-query.md).
+
+For other measurements, the agent writes temporary scripts or plugins as needed
+for the project's compiler version and the question being investigated, using
+existing project tools where suitable.
 
 The workflow is:
 
@@ -31,6 +36,8 @@ page or interaction loads or executes.
 
 - [SKILL.md](rspack-bundle-optimization/SKILL.md): main workflow and on-demand tooling.
 - [data-capture.md](rspack-bundle-optimization/references/data-capture.md): compiler facts, source context, and optional runtime coverage.
+- [usage-query.md](rspack-bundle-optimization/references/usage-query.md): install, capture, and query the local usage snapshot on demand.
+- [usage-graph-source-mapping.md](rspack-bundle-optimization/references/usage-graph-source-mapping.md): native export chains, source-map projection, and source ownership.
 - [measurement.md](rspack-bundle-optimization/references/measurement.md): exact asset measurement and comparison.
 - [agent-analysis.md](rspack-bundle-optimization/references/agent-analysis.md): chunk, export-usage, and syntax-transform analysis.
 - [report-template.md](rspack-bundle-optimization/references/report-template.md): final report structure.
@@ -43,6 +50,10 @@ npx skills add JSerFeng/rspack-bundle-size-optimization-skills \
 ```
 
 Add `--global` only for a global installation.
+
+The query tool requires Node.js 22.13+; install its dependencies with
+`npm ci --prefix <installed-skill>/scripts --omit=dev`. It does not install Rspack
+into the application or change its optimization settings.
 
 ## License
 
