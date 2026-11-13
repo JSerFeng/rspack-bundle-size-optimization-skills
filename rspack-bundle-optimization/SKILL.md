@@ -27,16 +27,23 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 - 完全没有执行的 module
 - 覆盖率较低的 module
 
-可以按照覆盖率从低到高的顺序依次分析，优先处理完全没有执行的 module，然后再处理覆盖率较低的 module，用 cli 查询他的 export usage 数据，查询已使用的导出，然后查询对应的使用链，分析出是否是真的被使用。这个时候有可能得出：
-
-- 真的被使用了，但使用方在另一个 chunk，那可能是有多个 importer 同时依赖了自己，如果是业务代码就通知用户这模块可以通过拆分成更多的小 module 分别导出。
-- 只是因为降级等原因导致，可能需要询问用户通过调整编译器 target 或者 loader 配置来解决。
-- 导出是由于分析出副作用或其他 Rspack 没能分析出的原因被保留，但实际上并未被使用的，可以通过调整编译器配置、loader 配置或使用 `@__NO_SIDE_EFFECTS__` `@__PURE__` 注释，pureFunctions 配置等方式来优化。
+可以按照覆盖率从低到高的顺序依次分析，优先处理完全没有执行的 module，然后再处理覆盖率较低的 module，用 cli 查询他的 export usage 数据，查询已使用的导出，然后查询对应的使用链，分析出是否是真的被使用。
 
 除此以外还可以按照导出影响面范围排序依次分析，什么叫导出影响面，就是导出的使用链影响到的下游模块数量，将影响面大的模块全部分析完，结合 coverage 分析。
 
-除了通用的分析外，可以关注下很多导出往往是因为误判有副作用，或是被 loader transform 后变成无法分析的产物，例如 polyfill 后的 await import() 等等 polyfill 后的 syntax。
+### 如何分析
+
+在判断导出是否真的被使用，你需要去查询该导出所有的使用方，使用方可能会有非常多层级，每一层都要分析，是否当前层真的用到了对应的导出，怎样界定用到？以用户的视角去看，是用户的逻辑中就是想要以这样的方式去使用，而不是因为编译器或打包器的分析结果而误判、或是因为降级 polyfill 等代码会导致意外的编译器无法识别的访问等。
+
+拿到 export usage 的 reference 中的每一层所有的 importer 都要分析，并且分析到每一条入边的根，所有根都分析好才算做这一个导出分析，要对所有可疑 module 的所有导出都进行分析。分析每一层的时候，你会得到 module 到 symbol 的信息，用 coverage 和 sourcemap 映射回源码，拿到这个源码然后去分析这个 symbol 是否是用户期望使用到的，才算做这一层的这一个 symbol 分析完。
+
 观察是否有些导出的使用来自上游打包器对 `export * as ns from '@pkg'` 等 namespace 语义的提前物化。Rollup 可能生成 `Object.freeze({ __proto__: null, foo, bar })`，esbuild 可能生成结构化 export helper 加 getter map；Rspack 此时看到的是普通运行时对象，并且 Rspack 没有对象 tree shaking 能力，会导致整个包被使用，这种情况尝试获取该包的源码，从源码中引入对应导出也许有帮助。
+
+### 分析数量
+
+覆盖率很低的所有 module 都需要走完这一套分析，但优先级你可以自行决定。
+
+如果有任何入边没分析完，遇到了错误，都需要报告出来给用户，需要用户协助的时候询问用户。
 
 ## 纯副作用引入
 
