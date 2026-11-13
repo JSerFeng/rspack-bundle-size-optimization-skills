@@ -5,11 +5,11 @@ Rsbuild, and Rspeedy projects.
 
 ## How it works
 
-The skill provides analysis guidance without bundled scripts. The agent writes
-temporary scripts or plugins as needed for the project's compiler version and
-the question being investigated, using existing project tools where suitable.
-Tools may collect compiler data, inspect the JavaScript after loaders, measure
-exact raw/gzip bytes, or analyze browser request and execution coverage.
+The skill bundles a local query CLI in `scripts/`. It indexes captured coverage
+and export-usage evidence, then returns bounded JSON for sorted module lists,
+coverage lines, references, export chains, and source windows without a report UI.
+The agent writes temporary capture plugins when needed for the project's compiler
+version and measures optimization results with the project's production tools.
 
 The workflow is:
 
@@ -31,9 +31,7 @@ page or interaction loads or executes.
 
 - [SKILL.md](rspack-bundle-optimization/SKILL.md): main workflow and on-demand tooling.
 - [data-capture.md](rspack-bundle-optimization/references/data-capture.md): compiler facts, source context, and optional runtime coverage.
-- [measurement.md](rspack-bundle-optimization/references/measurement.md): exact asset measurement and comparison.
-- [agent-analysis.md](rspack-bundle-optimization/references/agent-analysis.md): chunk, export-usage, and syntax-transform analysis.
-- [report-template.md](rspack-bundle-optimization/references/report-template.md): final report structure.
+- [query-cli.md](rspack-bundle-optimization/references/query-cli.md): local indexing, ranking, pagination, and evidence queries (Node >=22.13).
 
 ## Install
 

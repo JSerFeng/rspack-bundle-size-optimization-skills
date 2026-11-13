@@ -1,0 +1,12 @@
+{
+  "name": "rspack-bundle-query",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": ">=22.13.0" },
+  "bin": { "rspack-bundle-query": "query.cjs" },
+  "scripts": { "test": "node --test test/*.test.cjs" },
+  "dependencies": {
+    "@babel/parser": "7.28.4",
+    "@jridgewell/trace-mapping": "0.3.31"
+  }
+}

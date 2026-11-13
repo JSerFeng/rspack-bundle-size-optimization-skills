@@ -1,29 +1,10 @@
 # 数据抓取
 
-当源码和最终资源无法可靠还原编译器事实时，由 agent 根据当前 Rspack 版本编写临时
-采集插件。接入项目最终的 Rspack 配置 hook，只收集当前分析需要的数据。
-
-## 编译器事实
-
-按问题选择需要记录的内容：
-
-- 生效配置、Stats、资源清单和入口点；
-- 模块标识、依赖边、导出使用状态，以及模块与 chunk 的对应关系；
-- chunk group 的 chunks、origins 和父子关系；
-- 当前版本支持时，通过 RsdoctorPlugin 获取原始 export usage graph；
-- loader 处理后的完整源码，例如通过 `module.originalSource()` 获取 Rspack 实际接收的文本。
-
-先检查项目安装版本的 API 和数据结构，再实现插件。源码记录必须能与图中的模块和位置
-对应；模块拼接时保留内部模块关系。无法取得的数据应说明缺口，不把缺失值解释为未使用。
-
-完整抓取必须来自成功的生产构建。每次构建和每个 compiler 使用独立目录，记录构建命令、
-版本、项目状态及数据来源。输出格式和文件名按本次任务选择，保证能关联和复查即可。
+内置 CLI 查询时，使用 [query-cli.md](query-cli.md#准备和输入)
 
 ## 导出使用与源码上下文
 
-把 export usage 的 `consumer -> provider` 边关联到消费方的 loader 后源码。
-按提供方模块或导出名称筛选引用，保留所有匹配分支及位置，再定位所属函数、类和嵌套回调。
-需要语法归属时，按项目语法选择解析器并编写查询脚本。
+Rspack 的内置 RsdoctorPlugin 提供了 exportUsageGraph 数据，用于分析模块的导出使用情况，用 [查询 CLI](query-cli.md) 按模块或导出查询 references/chain，再用 reference 查询消费处及语法归属。
 
 分析时结合导入方源码、包元数据、图中的边和输出产物。位置与源码不匹配、源码缺失或解析
 不完整时，记录受影响的结论；不要仅根据导出名或原始业务源码猜测引用关系。
@@ -33,6 +14,45 @@
 用户关心页面或交互实际加载、执行的代码时，再采集浏览器网络请求和 Chrome/V8 精确覆盖率。
 记录页面、操作步骤、采集时机和目标范围；分析首屏时应在导航前启动采集。
 
-按需编写处理工具，将覆盖率关联到浏览器实际执行的同一份脚本文本，再结合 chunk 文件、
-最终模块 ID 和模块拼接关系定位模块。检查脚本、采集目标和映射是否缺失或不一致，说明
-无法映射的范围。一次操作中未执行的代码不能直接视为可删除代码。
+coverage 默认采用无报告 UI 的数据流程：保存录制，将覆盖率关联到浏览器执行的同一份
+脚本文本，再输出可查询的数据目录。应用本身仍可在浏览器运行；数据分析不依赖报告页面、
+截图、颜色高亮或人工点击。已有正确录制与映射时直接复用。
+
+使用支持 Agent CLI 的 `rspack-coverage` 时：
+
+```js
+new RspackCoveragePlugin({ server: false, dataDir: '/absolute/path/to/web-build-data' });
+```
+
+运行项目 production command，保存成功构建。插件会报告分析所需的配置调整；如它改变了
+生产优化设置，将其标为诊断构建，不把其体积当作正常生产收益。
+按现有采集方式获得 Chrome Coverage JSON 后：
+
+```sh
+rspack-coverage analyze --help
+rspack-coverage analyze --data-dir /absolute/path/to/web-build-data \
+  --coverage /absolute/path/to/Coverage.json --output /absolute/path/to/first-screen-data \
+  --scenario first-screen --precision per-block
+node <skill>/scripts/query.cjs index --coverage /absolute/path/to/first-screen-data \
+  --out /absolute/path/to/first-screen.sqlite
+node <skill>/scripts/query.cjs status --db /absolute/path/to/first-screen.sqlite
+node <skill>/scripts/query.cjs modules --db /absolute/path/to/first-screen.sqlite \
+  --scope loaded --sort coverage.generated.unexecutedBytes:desc --limit 20
+```
+
+CLI 的依赖安装及后续查询见 [query-cli.md](query-cli.md)。先确认当前 rspack-coverage 版本
+支持 analyze；Skill 的 query.cjs 不会为旧版本补上导出接口。`--precision` 应与录制方式相符，
+不清楚时保持 `unknown`。旧工具缺少这些接口时，按下述约定编写数据适配工具，不能假定
+`serve --no-open` 已经提供无服务进程的数据输出。
+
+数据交付采用三层，原始脚本、录制、map 和大图保留在磁盘：
+
+| 数据 | Agent 默认读取的内容 |
+| --- | --- |
+| 摘要 | schema 版本、build/snapshot/录制身份、场景、精度、匹配数量、统计口径及证据缺口 |
+| 分页索引 | 按未执行字节排序的 source/module，稳定 ID、资源归属、执行统计；不含整份源码和全图 |
+| 单项详情 | 按 ID 查询导出、直接引用、export chain 和带位置的源码窗口；返回下一页或待续查分支 |
+
+所有后续查询使用 Skill 的 `query.cjs <command> --db <index.sqlite>`，module/source/edge ID
+均从该索引查询获得，不混用原工具的 ID。按 module、coverage、references/reference 逐步
+展开；源码按 next 续读，chain 按 frontier 续查。完整选项从 describe 或查询说明读取。

@@ -1,0 +1,234 @@
+const { DatabaseSync } = require('node:sqlite');
+const { fs, path, fail, id, hash, json, signature, verifyInputs, setMeta } = require('./common.cjs');
+const { openUsage } = require('./adapters/usage.cjs');
+const { openCoverage } = require('./adapters/coverage.cjs');
+
+const METRICS = ['ge', 'gl', 'gx', 'gu', 'gr', 'se', 'sl', 'sx', 'su', 'sr'];
+function normalizedMetrics(value) {
+  if (!value) return null;
+  const values = ['emittedBytes', 'loadedBytes', 'executedBytes', 'unusedBytes'].map(key => value[key]);
+  if (values.some(number => !Number.isFinite(number) || number < 0)) fail('INVALID_INPUT', 'Coverage contains invalid byte metrics.');
+  if (values[2] > values[1] || values[1] > values[0] || values[3] !== values[1] - values[2])
+    fail('INVALID_INPUT', 'Coverage byte metrics must satisfy executed <= loaded <= emitted and unused = loaded - executed.');
+  return [...values, value.loadedBytes > 0 ? value.executedBytes / value.loadedBytes : null];
+}
+function sumMetrics(values) {
+  if (!values.length || values.some(value => value === null)) return null;
+  const sum = [0, 0, 0, 0, null];
+  for (const value of values) for (let i = 0; i < 4; i++) sum[i] += value[i];
+  sum[4] = sum[1] > 0 ? sum[2] / sum[1] : null;
+  return sum;
+}
+function packageName(resource) {
+  const parts = String(resource || '').replaceAll('\\', '/').split('/node_modules/');
+  if (parts.length < 2) return null;
+  const tail = parts.at(-1).split('/');
+  return tail[0].startsWith('@') ? tail.slice(0, 2).join('/') : tail[0];
+}
+function createSchema(db) {
+  db.exec(`
+    PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE; PRAGMA cache_size=-16384; PRAGMA mmap_size=0;
+    CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    CREATE TABLE modules(id TEXT PRIMARY KEY,identifier TEXT NOT NULL,resource TEXT,layer TEXT,type TEXT,package TEXT,
+      provided TEXT,used TEXT,loaded INTEGER,initial INTEGER,incoming INTEGER,consumers INTEGER,used_count INTEGER,
+      module_incoming INTEGER DEFAULT 0,module_outgoing INTEGER DEFAULT 0);
+    CREATE TABLE aliases(adapter TEXT,original_id TEXT,module_id TEXT,PRIMARY KEY(adapter,original_id));
+    CREATE TABLE sources(id TEXT PRIMARY KEY,path TEXT,space TEXT,hash TEXT,locator TEXT NOT NULL);
+    CREATE TABLE module_sources(module_id TEXT,source_id TEXT,PRIMARY KEY(module_id,source_id));
+    CREATE TABLE metrics(module_id TEXT,scope TEXT,ge REAL,gl REAL,gx REAL,gu REAL,gr REAL,se REAL,sl REAL,sx REAL,su REAL,sr REAL,PRIMARY KEY(module_id,scope));
+    CREATE TABLE edges(id TEXT PRIMARY KEY,origin TEXT NOT NULL,target TEXT NOT NULL,origin_export TEXT,target_export TEXT,
+      kind TEXT,dependency TEXT,dependency_type TEXT,raw_loc TEXT,source_path TEXT,source_loc TEXT,adapter TEXT,original_id TEXT,active INTEGER);
+    CREATE INDEX edge_in ON edges(target,kind,id); CREATE INDEX edge_out ON edges(origin,kind,id);
+    CREATE TABLE targets(module_id TEXT,path TEXT,edge_id TEXT,PRIMARY KEY(module_id,path,edge_id));
+    CREATE TABLE exports(id TEXT PRIMARY KEY,module_id TEXT,path TEXT,used TEXT,incoming INTEGER);
+    CREATE INDEX exports_module ON exports(module_id,id);
+    CREATE TABLE coverage_lines(id TEXT PRIMARY KEY,module_id TEXT,source_id TEXT,line INTEGER,state TEXT,
+      ge REAL,gl REAL,gx REAL,gu REAL,ranges TEXT,range_precision TEXT);
+    CREATE INDEX lines_module ON coverage_lines(module_id,id);
+    CREATE INDEX lines_bytes ON coverage_lines(module_id,gu DESC,id);
+    CREATE TABLE gaps(id TEXT PRIMARY KEY,module_id TEXT,kind TEXT,detail TEXT);
+    CREATE INDEX metrics_unexecuted ON metrics(scope,gu DESC,module_id);
+    CREATE INDEX metrics_emitted ON metrics(scope,ge DESC,module_id);
+    CREATE INDEX metrics_source ON metrics(scope,su DESC,module_id);
+    CREATE INDEX modules_incoming ON modules(incoming DESC,id);
+    CREATE INDEX modules_consumers ON modules(consumers DESC,id);
+  `);
+}
+
+function buildIndex(args) {
+  if (!args.coverage && !args.usage) fail('INVALID_ARGUMENT', 'index requires --coverage or --usage.');
+  if (!args.out) fail('INVALID_ARGUMENT', '--out is required.');
+  const output = path.resolve(args.out);
+  if (fs.existsSync(output)) fail('OUTPUT_EXISTS', 'The index already exists. Choose a new --out path.');
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  const pending = `${output}.${process.pid}.${Date.now()}.incomplete`;
+  let usage; let coverage; let db;
+  try {
+    usage = args.usage ? openUsage(path.resolve(args.usage)) : null;
+    coverage = args.coverage ? openCoverage(path.resolve(args.coverage)) : null;
+    const build = usage?.build || coverage.build;
+    if (usage && coverage && (usage.build.hash !== coverage.build.hash || path.resolve(usage.build.context) !== path.resolve(coverage.build.context) ||
+      (usage.build.compiler && coverage.build.compiler && usage.build.compiler !== coverage.build.compiler)))
+      fail('INPUT_IDENTITY_MISMATCH', 'Usage and coverage must identify the same build and compiler context.');
+    const inputs = [...new Set([...(coverage?.files || []), ...(usage ? [usage.file] : [])])].map(signature);
+    db = new DatabaseSync(pending); createSchema(db); db.exec('BEGIN');
+    const graphAvailable = usage ? usage.graphAvailable : coverage.graphAvailable;
+    const moduleMaps = { usage: new Map(), coverage: new Map() };
+    const moduleRows = new Map();
+    const addModule = (adapter, row) => {
+      if (typeof row.identifier !== 'string' || !row.identifier || typeof row.id !== 'string') fail('INVALID_INPUT', 'Module identity is missing.');
+      const key = id('mod', [row.identifier, row.layer ?? null]);
+      if (moduleMaps[adapter].has(row.id) && moduleMaps[adapter].get(row.id) !== key) fail('INVALID_INPUT', 'Conflicting module IDs.');
+      const known = moduleRows.get(key);
+      if (known?.adapterIds[adapter] && known.adapterIds[adapter] !== row.id) fail('INPUT_IDENTITY_MISMATCH', 'Multiple module instances share identifier/layer; cannot merge them safely.');
+      const provided = row.providedExports;
+      const used = row.usedExports;
+      const value = known || { id: key, identifier: row.identifier, resource: row.resource ?? null, layer: row.layer ?? null,
+        type: row.moduleType ?? row.type ?? null, package: packageName(row.resource || row.identifier), provided: null, used: null, adapterIds: {} };
+      if (provided !== undefined && provided !== null && (!Array.isArray(provided) || !provided.every(name => typeof name === 'string'))) fail('INVALID_INPUT', 'Invalid provided exports.');
+      if (used !== undefined && used !== null && typeof used !== 'boolean' && (!Array.isArray(used) || !used.every(name => typeof name === 'string'))) fail('INVALID_INPUT', 'Invalid used exports.');
+      if (adapter === 'usage' || !known) { value.provided = provided ?? null; value.used = used ?? null; }
+      value.adapterIds[adapter] = row.id;
+      moduleRows.set(key, value); moduleMaps[adapter].set(row.id, key);
+      db.prepare('INSERT OR REPLACE INTO aliases VALUES (?,?,?)').run(adapter, row.id, key);
+      return key;
+    };
+    const sourceInsert = db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?,?,?,?)');
+    const linkInsert = db.prepare('INSERT OR IGNORE INTO module_sources VALUES (?,?)');
+    const addSource = (moduleId, sourcePath, space, sourceHash, locator) => {
+      const key = id('src', [locator, space, sourceHash]);
+      sourceInsert.run(key, sourcePath, space, sourceHash, json(locator)); linkInsert.run(moduleId, key);
+      return key;
+    };
+    const gapInsert = db.prepare('INSERT OR IGNORE INTO gaps VALUES (?,?,?,?)');
+    const gap = (moduleId, kind, detail) => gapInsert.run(id('gap', [moduleId, kind, detail]), moduleId, kind, json(detail));
+    if (coverage) for (const row of coverage.modules()) addModule('coverage', row);
+    if (usage) for (const row of usage.modules()) {
+      const key = addModule('usage', row);
+      if (row.has_resource) addSource(key, row.resource || row.identifier, 'resource', row.resource_hash,
+        { adapter: 'usage', file: usage.file, module: row.id, space: 'resource' });
+      if (row.has_transformed) addSource(key, row.identifier, 'post-loader', row.transformed_hash,
+        { adapter: 'usage', file: usage.file, module: row.id, space: 'post-loader' });
+      if (row.source_gap) gap(key, 'source', { message: row.source_gap });
+    }
+    // Both inputs must have enough identity evidence to align module instances.
+    if (usage && coverage && ![...moduleRows.values()].some(row => row.adapterIds.usage && row.adapterIds.coverage))
+      fail('INPUT_IDENTITY_MISMATCH', 'No identical module identifier/layer pairs connect these inputs.');
+    if (coverage) {
+      for (const row of coverage.modules()) {
+        const moduleId = moduleMaps.coverage.get(row.id);
+        const captured = coverage.db.prepare("SELECT json_extract(CAST(payload AS TEXT),'$.transformedSource') AS text FROM export_modules WHERE id=?").get(row.id);
+        if (typeof captured?.text === 'string') addSource(moduleId, row.identifier, 'post-loader', hash(captured.text), { adapter: 'coverage-module', file: coverage.database, module: row.id });
+      }
+    }
+    const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const targetInsert = db.prepare('INSERT OR IGNORE INTO targets VALUES (?,?,?)');
+    let missingEdges = 0;
+    const ingestEdges = (adapter, edges) => {
+      for (const edge of edges) {
+        const origin = moduleMaps[adapter].get(edge.origin); const target = moduleMaps[adapter].get(edge.target);
+        if (!origin || !target) { missingEdges++; continue; }
+        const key = id('edge', [adapter, edge.originalId, edge.kind]);
+        edgeInsert.run(key, origin, target, json(edge.originExport), json(edge.targetExport), edge.kind,
+          edge.dependency, edge.dependencyType, json(edge.rawLocation), edge.sourcePath, json(edge.sourceLocation), adapter, edge.originalId,
+          edge.active === null || edge.active === undefined ? null : Number(edge.active));
+        if (edge.kind === 'native') {
+          const names = edge.targetExport;
+          if (Array.isArray(names) && names.length) for (let i = 1; i <= names.length; i++) targetInsert.run(target, json(names.slice(0, i)), key);
+          else targetInsert.run(target, json(names ?? null), key);
+        }
+      }
+    };
+    if (coverage) ingestEdges('coverage', coverage.edges(false));
+    if (usage) ingestEdges('usage', usage.edges());
+    else if (coverage) ingestEdges('coverage', coverage.edges(true));
+    if (missingEdges) gap(null, 'dangling-edges', { count: missingEdges, message: 'Edges without module identities were excluded; the captured graph is incomplete.' });
+    const filesByModule = new Map();
+    let mappedLineCount = 0;
+    if (coverage) {
+      for (const file of coverage.report.files) {
+        const knownModules = file.moduleIds.map(original => moduleMaps.coverage.get(original)).filter(Boolean);
+        if (knownModules.length !== file.moduleIds.length) gap(null, 'coverage-module-link', { source: file.id, message: 'Some module instances are absent from the manifest.' });
+        const detail = coverage.detail(file.id);
+        const locator = { adapter: 'coverage-detail', file: coverage.detailsFile, location: coverage.details.entries[file.id], originalId: file.id };
+        const textHash = typeof detail.content === 'string' ? hash(detail.content) : null;
+        for (const moduleId of knownModules) {
+          const sourceId = addSource(moduleId, file.path, 'resource', textHash, locator);
+          const list = filesByModule.get(moduleId) || []; list.push(file); filesByModule.set(moduleId, list);
+          const originalId = moduleRows.get(moduleId).adapterIds.coverage;
+          const insertLine = db.prepare('INSERT OR REPLACE INTO coverage_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+          for (const line of detail.mappedLines || []) {
+            const perInstance = line.moduleStates?.[originalId];
+            const evidence = perInstance || (file.moduleIds.length === 1 ? line : null);
+            const ge = evidence?.emittedBytes ?? null; const gl = evidence?.loadedBytes ?? null; const gx = evidence?.executedBytes ?? null;
+            const state = !evidence ? 'unknown' : gl === 0 ? 'not-loaded' : gx > 0 ? 'executed' : 'unexecuted';
+            const ranges = file.moduleIds.length === 1 ? line.ranges ?? [] : null;
+            insertLine.run(id('line', [moduleId, sourceId, line.lineIndex]), moduleId, sourceId, line.lineIndex + 1, state,
+              ge, gl, gx, gl === null || gx === null ? null : Math.max(0, gl - gx), json(ranges), ranges === null ? 'unavailable-per-instance' : 'source-line');
+            mappedLineCount++;
+          }
+          if (detail.content === null) gap(moduleId, 'source', { sourceId, message: 'Captured source content is unavailable.' });
+          if (file.moduleIds.length > 1) gap(moduleId, 'shared-source', { sourceId, message: 'Generated bytes cannot be uniquely assigned to this module instance.' });
+        }
+      }
+      for (const diagnostic of coverage.manifest.diagnostics || []) gap(null, 'build', diagnostic);
+      for (const ignored of coverage.report.importSummary.ignoredEntries || []) gap(null, 'ignored-coverage', ignored);
+    }
+    const moduleInsert = db.prepare('INSERT INTO modules(id,identifier,resource,layer,type,package,provided,used,loaded,initial,incoming,consumers,used_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const metricInsert = db.prepare(`INSERT INTO metrics VALUES (${Array(12).fill('?').join(',')})`);
+    const covModules = new Map(coverage ? coverage.modules().map(row => [row.id, row]) : []);
+    const chunks = new Map((coverage?.report.chunks || []).map(chunk => [chunk.id, chunk]));
+    for (const row of moduleRows.values()) {
+      const captured = covModules.get(row.adapterIds.coverage);
+      const knownChunks = (captured?.chunks || []).map(key => chunks.get(key)).filter(Boolean);
+      const loaded = knownChunks.length ? Number(knownChunks.some(chunk => chunk.loaded)) : null;
+      const initial = knownChunks.length ? Number(knownChunks.some(chunk => chunk.initial)) : null;
+      const incoming = graphAvailable ? db.prepare("SELECT count(*) AS n,count(DISTINCT origin) AS consumers FROM edges WHERE target=? AND kind='native'").get(row.id) : null;
+      const usedCount = Array.isArray(row.used) ? new Set(row.used).size : row.used === false ? 0 : null;
+      moduleInsert.run(row.id, row.identifier, row.resource, row.layer, row.type, row.package, json(row.provided), json(row.used), loaded, initial, incoming?.n ?? null, incoming?.consumers ?? null, usedCount);
+      const files = filesByModule.get(row.id) || [];
+      const generated = files.length && files.every(file => file.moduleIds.length === 1) ? sumMetrics(files.map(file => normalizedMetrics(file.metrics))) : null;
+      const retained = sumMetrics(files.map(file => normalizedMetrics(file.moduleMetricsById?.[row.adapterIds.coverage] ?? (file.moduleIds.length === 1 ? file.moduleMetrics : null))));
+      for (const scope of ['build', 'loaded']) {
+        const convert = value => !value ? Array(5).fill(null) : scope === 'loaded' ? [value[1], value[1], value[2], value[3], value[4]] : value;
+        metricInsert.run(row.id, scope, ...convert(generated), ...convert(retained));
+      }
+      if (coverage && !files.length) gap(row.id, 'coverage', { message: 'No coverage source is associated with this module; byte metrics are unknown.' });
+      if (!row.adapterIds.coverage && coverage) gap(row.id, 'module-alignment', { message: 'Usage module has no exact coverage identifier/layer match.' });
+    }
+    db.exec(`UPDATE modules SET module_incoming=(SELECT count(*) FROM edges WHERE target=modules.id AND kind='module-graph'),
+      module_outgoing=(SELECT count(*) FROM edges WHERE origin=modules.id AND kind='module-graph');`);
+    const exportInsert = db.prepare('INSERT OR IGNORE INTO exports VALUES (?,?,?,?,?)');
+    for (const row of moduleRows.values()) {
+      const paths = new Map((row.provided || []).map(name => [json([name]), [name]]));
+      for (const value of db.prepare('SELECT DISTINCT path FROM targets WHERE module_id=?').iterate(row.id)) {
+        const names = JSON.parse(value.path); if (Array.isArray(names) && names.length) paths.set(value.path, names);
+      }
+      for (const [key, names] of paths) {
+        const used = row.used === false ? 'unused' : Array.isArray(row.used) ? (row.used.includes(names[0]) ? (names.length === 1 ? 'used' : 'unknown') : 'unused') : 'unknown';
+        const count = graphAvailable ? db.prepare('SELECT count(*) AS n FROM targets WHERE module_id=? AND path=?').get(row.id, key).n : null;
+        exportInsert.run(id('export', [row.id, names]), row.id, key, used, count);
+      }
+    }
+    if (!graphAvailable) gap(null, 'usage-graph', { message: 'Native export usage graph unavailable. Empty results do not prove no usage.' });
+    if (usage?.metadata.captureError) gap(null, 'usage-capture', { message: usage.metadata.captureError });
+    if (usage?.metadata.discardedEdges) gap(null, 'usage-capture', { discardedEdges: usage.metadata.discardedEdges });
+    verifyInputs(inputs);
+    const identity = { inputs, build, coverage: coverage?.dataset.coverageSha256 ?? null };
+    const metadata = { kind: 'rspack-bundle-query', schemaVersion: 1, status: 'complete', datasetId: id('dataset', identity),
+      buildId: build.hash, compiler: build.compiler, context: build.context, inputs, coverageRunId: coverage?.dataset.coverageSha256 ?? null,
+      scenario: coverage?.dataset.scenario ?? null, coveragePrecision: coverage?.dataset.precision ?? null,
+      graphAvailable, coverageAvailable: Boolean(coverage), coverageRanges: false, scopes: coverage ? ['build', 'loaded'] : ['build'],
+      graphColumnBase: usage?.metadata.columnBase ?? 0, graphLocationSpace: usage?.metadata.locationSpace ?? 'auto', counts: { modules: moduleRows.size, coverageLines: mappedLineCount,
+        edges: db.prepare('SELECT count(*) AS n FROM edges').get().n, sources: db.prepare('SELECT count(*) AS n FROM sources').get().n,
+        gaps: db.prepare('SELECT count(*) AS n FROM gaps').get().n }, createdAt: new Date().toISOString() };
+    setMeta(db, metadata); db.exec('COMMIT'); db.close(); db = null;
+    fs.linkSync(pending, output); fs.unlinkSync(pending);
+    return { ok: true, schemaVersion: 1, datasetId: metadata.datasetId, buildId: metadata.buildId, compiler: metadata.compiler,
+      coverageRunId: metadata.coverageRunId, database: output, counts: metadata.counts };
+  } finally {
+    db?.close(); usage?.close(); coverage?.close();
+    if (fs.existsSync(pending)) fs.unlinkSync(pending);
+  }
+}
+module.exports = { buildIndex, METRICS };

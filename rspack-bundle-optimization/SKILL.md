@@ -3,58 +3,58 @@ name: rspack-bundle-optimization
 description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeedy. Use for bundle-size audits, optimization changes, measured reports, tree-shaking, splitChunks, ECMAScript targets, or browser runtime-loading analysis.
 ---
 
-# Rspack Bundle Optimization
+# 分析已抓取的数据
 
-找到真正影响用户目标的 JavaScript，应用所有安全且经过生产测量的优化，并诚实区分
-“已完成”“部分完成”和“仅有建议”。数据抓取、一次实验或生成报告都不等于完成。
+按项目需要编写并接入数据收集插件，见 [data-capture](references/data-capture.md)。
+逐个执行所有在下面列出的优化检查项目，必须全部项目都执行，如果有失败则尝试修复后重试。
 
-## 工作流
+## 真实启动项目
 
-### 1. 定义用户目标和可比范围
+设法访问到项目中的 Rspack 配置，让 Rspack 可以在生产环境的条件下启动起来，可以关闭对产物无关的插件来验证，然后设法启动首屏，等待首屏的稳定，确保页面加载完成。
 
-读取适用的 `AGENTS.md`，确认真实 production command、包管理器、编译器版本、dirty
-state 和可用验证命令。明确用户要仅分析还是实际修改，以及关心总 JS、首屏还是目标路由。
+## 检查 Chunk 是否包含非必要 Module
 
-### 2. 建立未修改的生产基线
+由 SplitChunks 的 `name` 配置或 `webpackChunkName` 注释产生的 Chunk 可能是由多个 Chunk 的 Module 聚合，这种 Chunk 可能包含有不必要的体积加载。
+设法访问到 Rspack 配置，给 Rspack 配置中增加一个插件访问所有的 Chunk Group 中所有的 chunks，收集到他们包含的所有 modules。
+一个 Chunk Group 可能有多个 origins，每一个 origin 代表一个入口 module，如果是由 `name` 或 `webpackChunkName` 形成的 Chunk Group，他们的 origins 就可能有多个，分别分析各个 origin 的静态依赖 module，会分别形成不同的 module 图，页面真正需要的 module 取决于页面是从哪一个 origin 开始执行的。例如 entry 用 `import()` 依赖了 A、B，然后用 `webpackChunkName` 或者 `cacheGroup.name`，生成了一个包含 A、B 所有 modules 的 Chunk，假设从 A 开始执行的话，那 B 的 modules 就是非必要的，可以从 coverage 数据中看到所有被执行的 origin 对应的 module factory，然后就能发现哪些 chunk 的哪些 module 是某次启动实际需要的，哪些是不需要的，把这些收集起来报告给用户，可以让用户通过删掉 `__webpack_chunk_name__` 或 `cacheGroup.name` 来优化这部分。
 
-先运行未修改的 production build，再保存构建产物、命令和测量结果。阅读
-[references/measurement.md](references/measurement.md)，分别记录用户关心的资源统计范围。
+实现上可以通过查询 coverage 所有的 origin 即可计算出非必要的 module，因为只需要扫描真正执行到的 origin 对应所有的静态依赖，和 chunk group 中的所有 chunk 取一个非即可找到所有的不必要 module。如果是非必要 module 那就可以找出原因，是 `__webpack_chunk_name__` 还是 `cacheGroup.name` 等配置导致，报告给用户。
 
-需要 compiler graph、chunk、export usage 或 post-loader source 时，阅读
-[references/data-capture.md](references/data-capture.md)。每个顶层 compiler 使用独立目录，
-不要混合 web、node、worker 或不同 run 的数据。
+## 分析 export usage
 
-记录成功构建对应的项目状态，使后续比较能够追溯到同一基线。
+拿到页面执行的 coverage 后，分析各个模块的执行覆盖率情况，分析：
 
-### 3. 分析并验证优化候选
+- 完全没有执行的 module
+- 覆盖率较低的 module
 
-阅读 [references/agent-analysis.md](references/agent-analysis.md)，逐项检查优化类别；
-不适用或无法完成的项目说明原因。结合源码、编译器数据和产物解释每个候选。
+可以按照覆盖率从低到高的顺序依次分析，优先处理完全没有执行的 module，然后再处理覆盖率较低的 module，用 cli 查询他的 export usage 数据，查询已使用的导出，然后查询对应的使用链，分析出是否是真的被使用。这个时候有可能得出：
 
-需要实验时，一次只改变一个目标变量，执行生产构建并比较同一统计范围。实际修改任务中，
-应用安全且经实测有效的优化；仅分析任务中，保留结论与验证证据，不留下实验修改。
+- 真的被使用了，但使用方在另一个 chunk，那可能是有多个 importer 同时依赖了自己，如果是业务代码就通知用户这模块可以通过拆分成更多的小 module 分别导出。
+- 只是因为降级等原因导致，可能需要询问用户通过调整编译器 target 或者 loader 配置来解决。
+- 导出是由于分析出副作用或其他 Rspack 没能分析出的原因被保留，但实际上并未被使用的，可以通过调整编译器配置、loader 配置或使用 `@__NO_SIDE_EFFECTS__` `@__PURE__` 注释，pureFunctions 配置等方式来优化。
 
-### 4. 基于最终代码重新测量
+除此以外还可以按照导出影响面范围排序依次分析，什么叫导出影响面，就是导出的使用链影响到的下游模块数量，将影响面大的模块全部分析完，结合 coverage 分析。
 
-应用接受的修改后，重新运行最终 production build。不要把独立实验 measurement 当成最终
-结果。按相同统计口径重新测量并与基线比较，执行与修改相关的正确性检查。
+除了通用的分析外，可以关注下很多导出往往是因为误判有副作用，或是被 loader transform 后变成无法分析的产物，例如 polyfill 后的 await import() 等等 polyfill 后的 syntax。
+观察是否有些导出的使用来自上游打包器对 `export * as ns from '@pkg'` 等 namespace 语义的提前物化。Rollup 可能生成 `Object.freeze({ __proto__: null, foo, bar })`，esbuild 可能生成结构化 export helper 加 getter map；Rspack 此时看到的是普通运行时对象，并且 Rspack 没有对象 tree shaking 能力，会导致整个包被使用，这种情况尝试获取该包的源码，从源码中引入对应导出也许有帮助。
 
-记录修改文件、每项独立收益、最终合并收益和验证结果。最终测量使用正常生产配置，
-清理临时接入的采集插件或实验开关；需要长期保留的优化代码按项目代码维护。
+## 纯副作用引入
 
-### 5. 写给普通用户的报告
+查看是否有模块是纯因为 side effects 而被引入，这种模块的 exports 都没有被 used 或者 used unknown，这种模块也许可以完全删除。
 
-完整阅读 [references/report-template.md](references/report-template.md)。正文默认使用用户的
-语言：
+所有的分析要结合真实 export usage graph 的数据，数据会提供某模块的导出所有上游的分支，某个export fn被上游class用到，而上游 class 又被 上游实例化，都可以通过这个数据得知。分析的时候是直接去分析该模块的源码，分析 export 是否真的确实被导出。
 
-1. 总 JS、首屏/目标路由分别减少多少；
-2. 真正改了什么；
-3. 哪些没有落地，为什么；
-4. 用户是否还需要做决定。
+分析出有未使用的被误判时，想办法解决，例如 `@__PURE__` `@__NO_SIDE_EFFECTS__` 或者 `pure_functions` 等等，如果没有合适的办法解决，也想办法验证解决后的收益。
 
-正文禁止堆砌互联网行业黑话等内部术语，通俗易懂但又详细的语言解释给普通用户。
+## 语法降级造成的优化效果不佳
 
-### 6. 最终交付边界
+通过将 swc-loader 或 babel-loader 的 target 配置成最新的 ecma 版本（需要注意如果配置了 env，swc-loader 会忽略 target），然后执行一次正常的构建，构建后查看体积是否明显降低，如果降幅明显，则继续检查是否有 module 数量的降低，因为更高级别的 ecma 等级可能让某些语法不再被 bundler 视为有副作用。如果发现 module 数量有降低，则记录下所有减少的 module，然后通过上一步的 export 和源码信息分析是什么语法降级导致优化没有了。
 
-确认请求范围内的优化项均已检查，交付结果有对应的生产测量和验证证据。存在未完成项时
-明确说明原因，不把实验结果或建议写成已落地收益。
+重点检查 dynamic import：比较转换前后 `import()` 结果的消费方式，确认 namespace
+成员读取是否变成编译器无法识别的普通对象访问。根据当前版本支持的语法或导出提示，
+优先尝试局部源码修改；需要批量处理时，再由 agent 编写适合当前项目的 loader。
+只有能确认完整使用的导出集合时才添加导出限制，namespace 作为完整对象传递或动态取值
+时不能仅凭局部读取推断。对转换后的代码验证行为，并通过生产 A/B 构建确认收益。
+
+提高 target 的实验用于定位原因。调查结束后恢复项目原本的 target，再优化调查出的
+模块，并通过生产构建验证最终修改满足实际支持的运行环境。
