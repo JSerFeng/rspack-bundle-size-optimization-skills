@@ -151,6 +151,39 @@ test('reference queries use captured source/map, bounded windows and syntax owne
   assert.equal(ref.mapping.sourceLocation.start.column, 31);
 });
 
+test('cross-line references preserve the shorter ending line instead of extending its column', t => {
+  const f = fixture(t);
+  const text = `${'\n'.repeat(174)}${' '.repeat(42)}foo(\n  value());  `;
+  assert.equal(text.split('\n')[175].length, 13);
+  f.index({ usage: usage(path.join(f.dir, 'usage.sqlite'), [module_('consumer', { text }), module_('provider')], [
+    { origin: 'consumer', target: 'provider', loc: '175:43-176:12', targetExport: ['foo'] },
+  ]) });
+  const provider = f.query('modules', { search: '/provider.js' }).items[0].moduleId;
+  const edge = f.query('references', { module: provider }).items[0].edgeId;
+  const ref = f.query('reference', { edge });
+  assert.deepEqual(ref.mapping.sourceLocation, { start: { line: 175, column: 42 }, end: { line: 176, column: 11 } });
+  assert.equal(ref.mapping.astGap, null);
+  assert.ok(ref.mapping.window.content.includes('foo(\n  value());'));
+});
+
+test('sourcemap tracing keeps a mapped cross-line endpoint on a shorter line', t => {
+  const f = fixture(t);
+  const resource = `${'\n'.repeat(174)}${' '.repeat(42)}foo(\n  value());  `;
+  const transformed = 'foo(value());';
+  const map = { version: 3, sources: ['consumer.ts'], sourcesContent: [resource], names: [],
+    mappings: require('@jridgewell/sourcemap-codec').encode([[[0, 0, 174, 42], [13, 0, 175, 11]]]) };
+  f.index({ usage: usage(path.join(f.dir, 'usage.sqlite'), [module_('consumer', { resourceText: resource, transformed, map }), module_('provider')], [
+    { origin: 'consumer', target: 'provider', loc: '1:1-14', targetExport: ['foo'] },
+  ]) });
+  const provider = f.query('modules', { search: '/provider.js' }).items[0].moduleId;
+  const edge = f.query('references', { module: provider }).items[0].edgeId;
+  const ref = f.query('reference', { edge, space: 'post-loader' });
+  assert.deepEqual(ref.mapping.sourceLocation, { start: { line: 175, column: 42 }, end: { line: 176, column: 11 } });
+  assert.equal(ref.mapping.coordinateSpace, 'map-source');
+  assert.equal(ref.mapping.astGap, null);
+  assert.ok(ref.mapping.window.content.includes('foo(\n  value());'));
+});
+
 test('transformed map candidates keep their coordinate space and captured identity', t => {
   const f = fixture(t);
   const resource = 'export const foo: number = bar();\n';
@@ -163,7 +196,8 @@ test('transformed map candidates keep their coordinate space and captured identi
   assert.equal(result.mapping.locationPrecision, 'unavailable');
   const candidate = result.mapping.candidates.find(c => c.coordinateSpace === 'map-source');
   assert.ok(candidate); assert.equal(candidate.window.content.length, 9);
-  const source = f.query('source', candidate.sourceQuery);
+  const { command, ...options } = candidate.sourceQuery;
+  const source = f.query(command, options);
   assert.equal(source.content, resource); assert.equal(source.coordinateSpace, 'map-source');
 });
 
@@ -247,5 +281,5 @@ test('source coverage overlay stays bounded and links to a source-filtered pagin
   assert.equal(result.coverage.total, 500); assert.equal(result.coverage.items.length, 20);
   const { command, ...args } = result.coverage.nextQuery;
   const items = all(f.query, command, args);
-  assert.equal(items.length, 500); assert.ok(items.every(line => line.sourceId === sourceId));
+  assert.equal(items.length, 500); assert.ok(items.every(line => result.coverage.sourceIds.includes(line.sourceId)));
 });

@@ -3,6 +3,9 @@
 A Codex skill for finding and reducing JavaScript emitted or loaded by Rspack,
 Rsbuild, and Rspeedy projects.
 
+Includes build capture, Chrome CDP coverage recording, source-map analysis, and
+bounded evidence queries in the skill's `scripts/` directory.
+
 ## Install
 
 ```bash

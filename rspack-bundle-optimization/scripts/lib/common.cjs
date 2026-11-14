@@ -59,7 +59,7 @@ function openIndex(file) {
   const db = openRead(file);
   try {
     const m = meta(db);
-    if (m.schemaVersion !== 1 || m.status !== 'complete' || m.kind !== 'rspack-bundle-query') fail('INVALID_INDEX', 'Unsupported or incomplete query index.');
+    if (m.schemaVersion !== 2 || m.status !== 'complete' || m.kind !== 'rspack-bundle-query') fail('INVALID_INDEX', 'Unsupported or incomplete query index. Rebuild with this version of index.');
     verifyInputs(m.inputs);
     return { db, meta: m };
   } catch (error) { db.close(); throw error; }

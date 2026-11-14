@@ -167,14 +167,16 @@ function mapReference(module, rawLoc, options = {}) {
 module.exports = { parseLocation, offset, boundedLines, mapReference, owners };
 
 const { fail, openRead, decode, json, integer } = require('./common.cjs');
-const { readDetail, sourcePathForContext } = require('./adapters/coverage.cjs');
+const { sourcePathForContext, canonicalSource } = require('./coverage.cjs');
 
 function loadSource(row, mapSource) {
   const locator = JSON.parse(row.locator);
   let text; let sourceMap = null; let detail = null;
-  if (locator.adapter === 'coverage-detail') {
-    detail = readDetail(locator.file, locator.location);
-    if (detail.id !== locator.originalId) fail('INPUT_CHANGED', 'Coverage source identity changed.');
+  if (locator.adapter === 'coverage-source') {
+    const db = openRead(locator.file);
+    try { detail = db.prepare('SELECT id,content FROM coverage_files WHERE id=?').get(locator.source); }
+    finally { db.close(); }
+    if (!detail) fail('SOURCE_UNAVAILABLE', 'Analyzed source is unavailable.');
     text = detail.content;
   } else {
     const db = openRead(locator.file);
@@ -183,11 +185,6 @@ function loadSource(row, mapSource) {
         const value = db.prepare('SELECT transformed,source_map,resource_content FROM modules WHERE id=?').get(locator.module);
         text = row.space === 'resource' ? value?.resource_content : value?.transformed;
         sourceMap = value?.source_map ?? null;
-      } else if (locator.adapter === 'coverage-module') {
-        const value = db.prepare('SELECT payload FROM export_modules WHERE id=?').get(locator.module);
-        const module = value ? decode(value.payload) : null;
-        text = module?.transformedSource;
-        sourceMap = module?.sourceMap ? json(module.sourceMap) : null;
       } else fail('INVALID_INDEX', 'Unknown source storage adapter.');
     } finally { db.close(); }
   }
@@ -236,6 +233,12 @@ function sourceRow(ctx, sourceId) {
   return row;
 }
 
+function coverageSourceIds(ctx, value) {
+  const canonical = canonicalSource(value.path, ctx.meta.context);
+  return ctx.db.prepare('SELECT s.id,s.path,s.space,s.hash FROM sources s JOIN module_sources ms ON ms.source_id=s.id WHERE ms.module_id=?').all(ctx.args.module)
+    .filter(row => row.hash === value.hash && row.space === value.space && canonicalSource(row.path, ctx.meta.context) === canonical).map(row => row.id);
+}
+
 function referenceWindow(value, args, location) {
   const context = integer(args.context, 3, 10);
   let line = Math.max(1, location.start.line - context); let column = 0;
@@ -249,13 +252,11 @@ function referenceWindow(value, args, location) {
 
 function reference(ctx, edge) {
   if (ctx.args.space !== undefined && !['auto', 'resource', 'post-loader'].includes(ctx.args.space)) fail('INVALID_ARGUMENT', '--space must be auto, resource, or post-loader.');
-  if (edge.adapter !== 'usage' && (ctx.args.space !== undefined || ctx.args['column-base'] !== undefined))
-    fail('INVALID_ARGUMENT', 'Coverage references already have normalized coordinates; --space and --column-base apply to standalone usage captures.');
   const raw = JSON.parse(edge.raw_loc);
   const sourceLocation = JSON.parse(edge.source_loc);
   const sourceRows = ctx.db.prepare('SELECT s.* FROM sources s JOIN module_sources ms ON s.id=ms.source_id WHERE ms.module_id=?').all(edge.origin);
   const usageSource = sourceRows.find(row => JSON.parse(row.locator).adapter === 'usage' && row.space === 'post-loader');
-  if (edge.adapter === 'usage' && usageSource) {
+  if (usageSource) {
     const locator = JSON.parse(usageSource.locator); const db = openRead(locator.file);
     let module;
     try { module = db.prepare('SELECT identifier,resource,transformed,source_map,resource_content FROM modules WHERE id=?').get(locator.module); }
@@ -263,20 +264,22 @@ function reference(ctx, edge) {
     if (!module) fail('SOURCE_UNAVAILABLE', 'Captured consumer module is missing.');
     const result = mapReference(module, raw, { context: integer(ctx.args.context, 3, 10), columnBase: integer(ctx.args['column-base'], ctx.meta.graphColumnBase ?? 1, 1), space: ctx.args.space || ctx.meta.graphLocationSpace || 'auto' });
     const attach = candidate => {
-      const row = candidate.coordinateSpace === 'resource'
+      let row = candidate.coordinateSpace === 'resource'
         ? sourceRows.find(row => row.space === 'resource' && JSON.parse(row.locator).adapter === 'usage') : usageSource;
+      if (candidate.coordinateSpace === 'resource') row = sourceRows.find(value => value.space === 'resource' && value.hash === candidate.sourceHash &&
+        JSON.parse(value.locator).adapter === 'coverage-source' && canonicalSource(value.path, ctx.meta.context) === canonicalSource(candidate.sourcePath, ctx.meta.context)) || row;
       const mapSource = candidate.coordinateSpace === 'map-source' ? candidate.sourcePath : undefined;
       const value = loadSource(row, mapSource);
       const { excerpt, focus, ...metadata } = candidate;
       return { ...metadata, window: referenceWindow(value, ctx.args, candidate.sourceLocation),
-        sourceQuery: { source: row.id, ...(mapSource === undefined ? {} : { 'map-source': mapSource }) } };
+        sourceQuery: { command: 'source', module: edge.origin, source: row.id, ...(mapSource === undefined ? {} : { 'map-source': mapSource }) } };
     };
     if (result.sourceHash) return attach(result);
     return { ...result, candidates: result.candidates.map(attach) };
   }
   const canonical = value => typeof value === 'string' && !value.includes('://') ? require('node:path').resolve(ctx.meta.context, value) : value;
   const candidates = sourceLocation && edge.source_path ? sourceRows.filter(row => row.space === 'resource' &&
-    (canonical(row.path) === canonical(edge.source_path) || (JSON.parse(row.locator).adapter === 'coverage-detail' &&
+    (canonical(row.path) === canonical(edge.source_path) || (JSON.parse(row.locator).adapter === 'coverage-source' &&
       sourcePathForContext(row.path, ctx.meta.context) === sourcePathForContext(edge.source_path, ctx.meta.context)))) : [];
   const original = candidates.length === 1 ? candidates[0] : null;
   const selected = original || sourceRows.find(row => row.space === 'post-loader');
@@ -294,4 +297,4 @@ function reference(ctx, edge) {
     window: referenceWindow(value, ctx.args, location),
     ...owners(value.text, value.path, location), gap: original ? null : 'Showing captured post-loader coordinates; original-source mapping is unavailable.' };
 }
-module.exports = { ...module.exports, loadSource, sourceWindow, sourceRow, reference };
+module.exports = { ...module.exports, loadSource, sourceWindow, sourceRow, reference, coverageSourceIds };

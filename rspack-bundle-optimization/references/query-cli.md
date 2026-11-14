@@ -14,28 +14,35 @@ node <skill>/scripts/query.cjs describe
 node <skill>/scripts/query.cjs describe --command modules
 ```
 
-支持两种输入，可单独使用：
-
-- `--coverage`：`rspack-coverage analyze` 导出的 Agent 数据目录，包含 `dataset.json`
-  schema 1、v2 快照、complete report、`report.sources` 及索引、`snapshot.sqlite`。
-  采集方法见 [data-capture.md](data-capture.md#浏览器运行数据按需)。
-- `--usage`：已有独立 usage SQLite 快照（schema 1），含编译期关系和构建时源码/map，
-  不需要浏览器录制。契约见下文；任意 Stats 或 Rsdoctor JSON 不能直接传入。
+采集流程见 [data-capture.md](data-capture.md)。内置 capture-plugin.cjs 在成功构建后保存
+build.sqlite；内置 record.cjs 可连接现有 Chrome 录制精确 coverage。数据在本 Skill 内分析：
 
 ```sh
-node <skill>/scripts/query.cjs index --coverage <agent-data-dir> --out <index.sqlite>
-node <skill>/scripts/query.cjs index --usage <usage.sqlite> --out <index.sqlite>
-node <skill>/scripts/query.cjs index --coverage <agent-data-dir> --usage <usage.sqlite> --out <index.sqlite>
+node <skill>/scripts/query.cjs analyze --build <build.sqlite> --coverage <recording.json> --out <coverage.sqlite>
+node <skill>/scripts/query.cjs index --coverage <coverage.sqlite> --out <index.sqlite>
+# 只分析编译期 usage 时直接索引构建快照：
+node <skill>/scripts/query.cjs index --usage <build.sqlite> --out <index.sqlite>
 node <skill>/scripts/query.cjs status --db <index.sqlite>
 ```
 
-索引是派生数据，不覆盖已有文件。两类输入同时提供时须有相同 build hash、context、
-已知 compiler，以及可精确对齐的完整 identifier/layer，不按文件名合并。原生 export 图
-采用 usage 输入，coverage 输入补充 module graph 与录制证据。
+analyze 接受内置录制或 Chrome Coverage JSON（url/text/ranges），支持 raw V8 functions/ranges
+计数。它核对同一构建的 URL 和脚本文本 hash，解析普通/索引 sourcemap，转换 UTF-16 区间为
+生成代码 UTF-8 字节，关联源码行及模块。没有 sourcemap 的生成字节计入 unmapped。
+输出 coverage.sqlite 自带构建、图、源码、map 和录制；--scenario 标注场景，--precision
+只描述已有录制精度，不升级证据。analyze 和 index 都不会覆盖现有输出。
 
-一个索引绑定一个构建和至多一份录制，不同场景分别建索引。保留原始目录/数据库，
-源码/map 在查询时按 ID 读取。每次查询检查路径、大小、mtime 和 inode，变化返回
-`INPUT_CHANGED`，需要重建索引。该检查发现意外变更，不是逐次全文件校验和审计。
+index 支持两类输入，可单独或同时提供：
+
+- --coverage：本 Skill analyze 生成的 coverage SQLite（kind rspack-bundle-coverage，schema 1）。
+- --usage：内置插件的构建 SQLite，或符合下文 schema 1 的独立 usage 快照。
+
+同时提供时须有相同 build hash、context、已知 compiler，以及可精确对齐的完整
+identifier/layer。原生图采用 usage 输入，coverage 输入补充模块关系及录制。
+一个索引绑定一个构建和至多一份录制，不同场景分别建索引。
+
+保留 index 使用的原始 SQLite，源码/map 在查询时按 ID 读取。查询检查路径、大小、mtime
+和 inode，变化返回 INPUT_CHANGED；该检查发现意外变更，不是逐次全文件校验和审计。
+此次索引内部 schema 升为 2，旧索引用当前命令重建；查询 JSON 接口仍为 schemaVersion 1。
 
 ## 排序后读取模块
 
@@ -58,7 +65,7 @@ node <skill>/scripts/query.cjs module --db <index.sqlite> --module <module-id> -
 | `coverage.generated.loadedBytes` | 本次录制加载的生成字节 |
 | `coverage.generated.unexecutedBytes` | loaded - executed，不直接换算成收益 |
 | `coverage.generated.executionRatio` | executed / loaded，分母为零时 null |
-| `coverage.retainedSource.unexecutedBytes` | 另一口径：保留原始源码行的未执行字节 |
+| `coverage.retainedSource.unexecutedBytes` | 另一口径：保留映射源码行的未执行字节 |
 | `usage.incomingReferences` | 原生图直接入边数 |
 | `usage.distinctConsumers` | 原生图不同直接消费者数 |
 | `usage.usedExportCount` | 编译器确认的具名使用导出数，unknown 不换算成零 |
@@ -70,8 +77,9 @@ module 的 initial 标志只表示编译器资源归属，不表示页面确实�
 列表不带源码/全图。`--search <substring>`、`--package <exact-package-name>` 筛选，
 `--fields path,coverage.generated,usage` 缩小字段，moduleId 始终保留。未知指标为 null，
 升降序都排最后，同指标再按 ID 排序。`ranking.known/unknown` 表示首排序字段的完整性。
-共享 source 无法拆到实例的生成指标为 null；源码指标也只采用真实 per-instance 数据。
+共享 source 若能通过具体 asset/chunk 唯一关联实例，会采用该实例指标；仍有歧义则为 null。
 两种字节不能相加，均不代表 gzip 收益。
+Network-only 资源若没有对应脚本文本/coverage，执行相关字段保留 null；status/gaps 说明缺口。
 
 ## 按证据逐步展开
 
@@ -115,6 +123,8 @@ node <skill>/scripts/query.cjs source --db <index.sqlite> --source <source-id> \
 按 `next.line/column` 续读，不用当前磁盘源码冒充构建文本。map 候选的 sourceQuery 带有
 `map-source` 时，使用 `source --map-source <captured-map-source>`。大于 2 MiB 的文本仍可
 分窗读取，语法 owner 会说明 AST 预算缺口。图关系不等于运行时调用，未执行不证明可删。
+reference 的 sourceQuery 自带 command/module。相同模块、坐标空间、完整路径和已验证 hash
+一致的捕获文本会关联同一份行 coverage；响应 coverage.sourceIds 说明实际关联的来源。
 
 ## 分页、预算与错误
 
@@ -131,8 +141,8 @@ gaps=0 不代表已确认业务必要性、所有运行场景或实际优化收�
 
 ## 独立 usage SQLite 契约
 
-adapter 读取已有快照，不捆绑生产采集器。需要采集时按当前 Rspack API 实现临时插件，
-写入以下 schema，完整文本保留在 SQLite，查询时不重建全图 JSON：
+优先使用内置 capture-plugin.cjs。需要接入其他采集器时，独立 usage 输入可采用以下
+最小 schema，完整文本保留在 SQLite，查询时不重建全图 JSON：
 
 ```sql
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); -- JSON values
@@ -159,11 +169,13 @@ graphAvailable=false，不能把未抓到的事实写成空图且声明图可用
 ## 验证
 
 ```sh
+# 安装开发依赖后，运行单元测试、真实 Rspack 编译及大图查询测试：
+npm ci --prefix <skill>/scripts
 npm test --prefix <skill>/scripts
-# 真实编译/导出集成测试需要另有已构建的 rspack-coverage checkout：
-RSPACK_COVERAGE_REPO=<coverage-repo> npm test --prefix <skill>/scripts
+# 显式指定 Chrome，额外运行本地临时页面的真实浏览器录制测试：
+CHROME_PATH=<Chrome-executable> npm test --prefix <skill>/scripts
 ```
 
-默认测试含分页、未知归因、映射、图预算及 1 万模块/3 万边合成测试。真实集成测试要求
-该 checkout 已提供 server:false/analyze。已发布旧版本缺少这些接口时先适配导出侧，
-本 Skill CLI 不负责采集或重做 coverage 映射。
+Rspack 仅作为测试开发依赖；正常安装 --omit=dev 后，构建仍由被分析项目自己的编译器执行。
+测试覆盖 UTF-8/UTF-16、零执行子区间、构建匹配、缺图、共享实例、映射坐标空间、分页、图预算、
+分析产物独立性及 1 万模块/3 万边合成图。没有 Chrome 时仅跳过浏览器测试，不调用外部分析服务。

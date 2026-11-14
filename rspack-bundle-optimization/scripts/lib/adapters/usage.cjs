@@ -24,6 +24,14 @@ function openUsage(file) {
           sourcePath: null, sourceLocation: null, kind: 'native', dependencyType: 'export usage',
         };
       },
+      *moduleEdges() {
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='refs'").get()) return;
+        for (const row of db.prepare('SELECT * FROM refs ORDER BY id').iterate()) yield {
+          originalId: row.id, origin: row.origin, target: row.target, originExport: null, targetExport: null,
+          dependency: row.id, rawLocation: decode(row.loc || 'null'), sourcePath: null, sourceLocation: null,
+          kind: 'module-graph', dependencyType: row.dependency_type, active: row.active === null ? null : Boolean(row.active),
+        };
+      },
       close() { db.close(); },
     };
   } catch (error) { db.close(); throw error; }

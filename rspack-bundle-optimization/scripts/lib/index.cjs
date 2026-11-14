@@ -7,16 +7,17 @@ const METRICS = ['ge', 'gl', 'gx', 'gu', 'gr', 'se', 'sl', 'sx', 'su', 'sr'];
 function normalizedMetrics(value) {
   if (!value) return null;
   const values = ['emittedBytes', 'loadedBytes', 'executedBytes', 'unusedBytes'].map(key => value[key]);
-  if (values.some(number => !Number.isFinite(number) || number < 0)) fail('INVALID_INPUT', 'Coverage contains invalid byte metrics.');
-  if (values[2] > values[1] || values[1] > values[0] || values[3] !== values[1] - values[2])
+  if (!Number.isFinite(values[0]) || values.some(number => number !== null && (!Number.isFinite(number) || number < 0))) fail('INVALID_INPUT', 'Coverage contains invalid byte metrics.');
+  if ((values[1] === null && (values[2] !== null || values[3] !== null)) || (values[2] === null && values[3] !== null) ||
+    (values[1] !== null && (values[1] > values[0] || (values[2] !== null && (values[2] > values[1] || values[3] !== values[1] - values[2])))))
     fail('INVALID_INPUT', 'Coverage byte metrics must satisfy executed <= loaded <= emitted and unused = loaded - executed.');
-  return [...values, value.loadedBytes > 0 ? value.executedBytes / value.loadedBytes : null];
+  return [...values, value.loadedBytes > 0 && value.executedBytes !== null ? value.executedBytes / value.loadedBytes : null];
 }
 function sumMetrics(values) {
   if (!values.length || values.some(value => value === null)) return null;
   const sum = [0, 0, 0, 0, null];
-  for (const value of values) for (let i = 0; i < 4; i++) sum[i] += value[i];
-  sum[4] = sum[1] > 0 ? sum[2] / sum[1] : null;
+  for (const value of values) for (let i = 0; i < 4; i++) sum[i] = sum[i] === null || value[i] === null ? null : sum[i] + value[i];
+  sum[4] = sum[1] > 0 && sum[2] !== null ? sum[2] / sum[1] : null;
   return sum;
 }
 function packageName(resource) {
@@ -117,8 +118,9 @@ function buildIndex(args) {
     if (coverage) {
       for (const row of coverage.modules()) {
         const moduleId = moduleMaps.coverage.get(row.id);
-        const captured = coverage.db.prepare("SELECT json_extract(CAST(payload AS TEXT),'$.transformedSource') AS text FROM export_modules WHERE id=?").get(row.id);
-        if (typeof captured?.text === 'string') addSource(moduleId, row.identifier, 'post-loader', hash(captured.text), { adapter: 'coverage-module', file: coverage.database, module: row.id });
+        const captured = coverage.db.prepare('SELECT transformed,transformed_hash,resource_content,resource_hash FROM modules WHERE id=?').get(row.id);
+        if (typeof captured?.transformed === 'string') addSource(moduleId, row.identifier, 'post-loader', captured.transformed_hash || hash(captured.transformed), { adapter: 'usage', file: coverage.database, module: row.id, space: 'post-loader' });
+        if (typeof captured?.resource_content === 'string') addSource(moduleId, row.resource || row.identifier, 'resource', captured.resource_hash || hash(captured.resource_content), { adapter: 'usage', file: coverage.database, module: row.id, space: 'resource' });
       }
     }
     const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
@@ -140,7 +142,7 @@ function buildIndex(args) {
       }
     };
     if (coverage) ingestEdges('coverage', coverage.edges(false));
-    if (usage) ingestEdges('usage', usage.edges());
+    if (usage) { ingestEdges('usage', usage.edges()); if (!coverage) ingestEdges('usage', usage.moduleEdges()); }
     else if (coverage) ingestEdges('coverage', coverage.edges(true));
     if (missingEdges) gap(null, 'dangling-edges', { count: missingEdges, message: 'Edges without module identities were excluded; the captured graph is incomplete.' });
     const filesByModule = new Map();
@@ -150,10 +152,10 @@ function buildIndex(args) {
         const knownModules = file.moduleIds.map(original => moduleMaps.coverage.get(original)).filter(Boolean);
         if (knownModules.length !== file.moduleIds.length) gap(null, 'coverage-module-link', { source: file.id, message: 'Some module instances are absent from the manifest.' });
         const detail = coverage.detail(file.id);
-        const locator = { adapter: 'coverage-detail', file: coverage.detailsFile, location: coverage.details.entries[file.id], originalId: file.id };
+        const locator = { adapter: 'coverage-source', file: coverage.database, source: file.id };
         const textHash = typeof detail.content === 'string' ? hash(detail.content) : null;
         for (const moduleId of knownModules) {
-          const sourceId = addSource(moduleId, file.path, 'resource', textHash, locator);
+          const sourceId = addSource(moduleId, file.path, file.coordinateSpace || 'map-source', textHash, locator);
           const list = filesByModule.get(moduleId) || []; list.push(file); filesByModule.set(moduleId, list);
           const originalId = moduleRows.get(moduleId).adapterIds.coverage;
           const insertLine = db.prepare('INSERT OR REPLACE INTO coverage_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)');
@@ -161,7 +163,7 @@ function buildIndex(args) {
             const perInstance = line.moduleStates?.[originalId];
             const evidence = perInstance || (file.moduleIds.length === 1 ? line : null);
             const ge = evidence?.emittedBytes ?? null; const gl = evidence?.loadedBytes ?? null; const gx = evidence?.executedBytes ?? null;
-            const state = !evidence ? 'unknown' : gl === 0 ? 'not-loaded' : gx > 0 ? 'executed' : 'unexecuted';
+            const state = !evidence || ![ge, gl, gx].every(Number.isFinite) ? 'unknown' : gl === 0 ? 'not-loaded' : gx > 0 ? 'executed' : 'unexecuted';
             const ranges = file.moduleIds.length === 1 ? line.ranges ?? [] : null;
             insertLine.run(id('line', [moduleId, sourceId, line.lineIndex]), moduleId, sourceId, line.lineIndex + 1, state,
               ge, gl, gx, gl === null || gx === null ? null : Math.max(0, gl - gx), json(ranges), ranges === null ? 'unavailable-per-instance' : 'source-line');
@@ -173,6 +175,8 @@ function buildIndex(args) {
       }
       for (const diagnostic of coverage.manifest.diagnostics || []) gap(null, 'build', diagnostic);
       for (const ignored of coverage.report.importSummary.ignoredEntries || []) gap(null, 'ignored-coverage', ignored);
+      for (const row of coverage.db.prepare('SELECT module_id,kind,detail FROM capture_gaps').iterate()) gap(moduleMaps.coverage.get(row.module_id) ?? null, row.kind, JSON.parse(row.detail));
+      for (const file of coverage.report.files) if (!file.moduleIds.length) gap(null, 'source-module-link', { path: file.path, message: 'Mapped source has no exact captured module instance.' });
     }
     const moduleInsert = db.prepare('INSERT INTO modules(id,identifier,resource,layer,type,package,provided,used,loaded,initial,incoming,consumers,used_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const metricInsert = db.prepare(`INSERT INTO metrics VALUES (${Array(12).fill('?').join(',')})`);
@@ -181,13 +185,13 @@ function buildIndex(args) {
     for (const row of moduleRows.values()) {
       const captured = covModules.get(row.adapterIds.coverage);
       const knownChunks = (captured?.chunks || []).map(key => chunks.get(key)).filter(Boolean);
-      const loaded = knownChunks.length ? Number(knownChunks.some(chunk => chunk.loaded)) : null;
+      const loaded = knownChunks.length ? knownChunks.some(chunk => chunk.loaded === true) ? 1 : knownChunks.some(chunk => chunk.loaded === null) ? null : 0 : null;
       const initial = knownChunks.length ? Number(knownChunks.some(chunk => chunk.initial)) : null;
       const incoming = graphAvailable ? db.prepare("SELECT count(*) AS n,count(DISTINCT origin) AS consumers FROM edges WHERE target=? AND kind='native'").get(row.id) : null;
       const usedCount = Array.isArray(row.used) ? new Set(row.used).size : row.used === false ? 0 : null;
       moduleInsert.run(row.id, row.identifier, row.resource, row.layer, row.type, row.package, json(row.provided), json(row.used), loaded, initial, incoming?.n ?? null, incoming?.consumers ?? null, usedCount);
       const files = filesByModule.get(row.id) || [];
-      const generated = files.length && files.every(file => file.moduleIds.length === 1) ? sumMetrics(files.map(file => normalizedMetrics(file.metrics))) : null;
+      const generated = sumMetrics(files.map(file => normalizedMetrics(file.generatedMetricsById ? file.generatedMetricsById[row.adapterIds.coverage] ?? null : file.moduleIds.length === 1 ? file.metrics : null)));
       const retained = sumMetrics(files.map(file => normalizedMetrics(file.moduleMetricsById?.[row.adapterIds.coverage] ?? (file.moduleIds.length === 1 ? file.moduleMetrics : null))));
       for (const scope of ['build', 'loaded']) {
         const convert = value => !value ? Array(5).fill(null) : scope === 'loaded' ? [value[1], value[1], value[2], value[3], value[4]] : value;
@@ -215,11 +219,12 @@ function buildIndex(args) {
     if (usage?.metadata.discardedEdges) gap(null, 'usage-capture', { discardedEdges: usage.metadata.discardedEdges });
     verifyInputs(inputs);
     const identity = { inputs, build, coverage: coverage?.dataset.coverageSha256 ?? null };
-    const metadata = { kind: 'rspack-bundle-query', schemaVersion: 1, status: 'complete', datasetId: id('dataset', identity),
+    const metadata = { kind: 'rspack-bundle-query', schemaVersion: 2, status: 'complete', datasetId: id('dataset', identity),
       buildId: build.hash, compiler: build.compiler, context: build.context, inputs, coverageRunId: coverage?.dataset.coverageSha256 ?? null,
       scenario: coverage?.dataset.scenario ?? null, coveragePrecision: coverage?.dataset.precision ?? null,
       graphAvailable, coverageAvailable: Boolean(coverage), coverageRanges: false, scopes: coverage ? ['build', 'loaded'] : ['build'],
-      graphColumnBase: usage?.metadata.columnBase ?? 0, graphLocationSpace: usage?.metadata.locationSpace ?? 'auto', counts: { modules: moduleRows.size, coverageLines: mappedLineCount,
+      coverageTotals: coverage?.metadata.coverageTotals ?? null, coverageImportSummary: coverage?.metadata.coverageImportSummary ?? null,
+      graphColumnBase: usage?.metadata.columnBase ?? coverage?.metadata.columnBase ?? 1, graphLocationSpace: usage?.metadata.locationSpace ?? coverage?.metadata.locationSpace ?? 'auto', counts: { modules: moduleRows.size, coverageLines: mappedLineCount,
         edges: db.prepare('SELECT count(*) AS n FROM edges').get().n, sources: db.prepare('SELECT count(*) AS n FROM sources').get().n,
         gaps: db.prepare('SELECT count(*) AS n FROM gaps').get().n }, createdAt: new Date().toISOString() };
     setMeta(db, metadata); db.exec('COMMIT'); db.close(); db = null;

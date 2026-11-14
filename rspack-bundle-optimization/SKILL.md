@@ -6,11 +6,13 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 # 分析已抓取的数据
 
 按项目需要编写并接入数据收集插件，见 [data-capture](references/data-capture.md)。
+默认使用 Skill 自带的 `scripts/capture-plugin.cjs` 保存构建，`scripts/record.cjs` 连接 Chrome
+录制 coverage，再由 `scripts/query.cjs analyze/index` 完成 sourcemap 分析和按需查询。
 逐个执行所有在下面列出的优化检查项目，必须全部项目都执行，如果有失败则尝试修复后重试。
 
 ## 真实启动项目
 
-设法访问到项目中的 Rspack 配置，让 Rspack 可以在生产环境的条件下启动起来，可以关闭对产物无关的插件来验证，然后设法启动首屏，等待首屏的稳定，确保页面加载完成。
+设法访问到项目中的 Rspack 配置，让 Rspack 可以在生产环境的条件下启动起来（主要是 providedExports, usedExports, innerGraph 一定需要开启才能分析 export），但需要关闭 concatenateModules 配置，因为他会妨碍后续对 export usage 的分析，可以关闭其他对产物无关的插件来验证，然后设法启动首屏，等待首屏的稳定，确保页面加载完成。
 
 ## 检查 Chunk 是否包含非必要 Module
 
@@ -37,13 +39,30 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 
 拿到 export usage 的 reference 中的每一层所有的 importer 都要分析，并且分析到每一条入边的根，所有根都分析好才算做这一个导出分析，要对所有可疑 module 的所有导出都进行分析。分析每一层的时候，你会得到 module 到 symbol 的信息，用 coverage 和 sourcemap 映射回源码，拿到这个源码然后去分析这个 symbol 是否是用户期望使用到的，才算做这一层的这一个 symbol 分析完。
 
-观察是否有些导出的使用来自上游打包器对 `export * as ns from '@pkg'` 等 namespace 语义的提前物化。Rollup 可能生成 `Object.freeze({ __proto__: null, foo, bar })`，esbuild 可能生成结构化 export helper 加 getter map；Rspack 此时看到的是普通运行时对象，并且 Rspack 没有对象 tree shaking 能力，会导致整个包被使用，这种情况尝试获取该包的源码，从源码中引入对应导出也许有帮助。
+当某个导出的 originExport 为 null 时，有下面几种情况：
+- 正常的模块级使用	比如顶层初始化调用，不依赖某个具名导出是否被使用
+- 没有导出归属分析结果	比如 innerGraph 关闭，或该模块因 eval 退出分析
+- 因潜在副作用而保留	即使没有具名导出使用，初始化中的调用仍可能需要保留
+- 无法确定 export * 的导出名称	按整个转导出关系保守记录
+- 转导出的所属模块关联缺失	找不到对应模块时的保守记录，属于需要排查的异常情况
+那你就需要去找到对应的源码的位置，然后检查是否是用户预期的被使用。
+
+### 分析执行边界
+
+仅使用本 Skill 提供的采集、查询和分析工具。
+不得自行编写或运行替代逐条源码分析的归类、评分、判定脚本。
+不得根据导出名、函数名、关键词或语法节点匹配，每条引用是否符合业务预期，必须由 Agent 阅读实际源码、结合原生 exportUsageGraph 逐层判断，并说明证据与理由。批量查询、遍历数量、名称匹配和自动标签均不能代替这个过程。
 
 ### 分析数量
 
 覆盖率很低的所有 module 都需要走完这一套分析，但优先级你可以自行决定。
 
 如果有任何入边没分析完，遇到了错误，都需要报告出来给用户，需要用户协助的时候询问用户。
+
+## namespace star export
+
+观察是否有些导出的使用来自上游打包器对 `export * as ns from '@pkg'` 等 namespace 语义的提前物化。Rollup 可能生成 `Object.freeze({ __proto__: null, foo, bar })`，esbuild 可能生成结构化 export helper 加 getter map；Rspack 此时看到的是普通运行时对象，并且 Rspack 没有对象 tree shaking 能力，会导致整个包被使用，这种情况尝试获取该包的源码，从源码中引入对应导出也许有帮助。
+
 
 ## 纯副作用引入
 

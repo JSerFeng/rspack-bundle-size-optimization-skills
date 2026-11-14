@@ -1,94 +1,53 @@
-const { fs, path, fail, readJson, safePath, openRead, decode } = require('../common.cjs');
+const { openRead, meta, fail, decode } = require('../common.cjs');
+const { sourcePathForContext } = require('../coverage.cjs');
 
-function readDetail(file, location) {
-  if (!location || !Number.isSafeInteger(location.offset) || location.offset < 0 || !Number.isSafeInteger(location.length) || location.length < 1 || location.length > 256 * 1024 * 1024)
-    fail('INVALID_INPUT', 'Invalid coverage source detail location.');
-  const fd = fs.openSync(file, 'r');
+function openCoverage(file) {
+  const db = openRead(file);
   try {
-    const buffer = Buffer.alloc(location.length);
-    let read = 0;
-    while (read < buffer.length) {
-      const n = fs.readSync(fd, buffer, read, buffer.length - read, location.offset + read);
-      if (!n) fail('INVALID_INPUT', 'Coverage source detail is truncated.');
-      read += n;
+    const metadata = meta(db);
+    if (metadata.schema !== 1 || metadata.kind !== 'rspack-bundle-coverage' || metadata.coverageSchema !== 1 || metadata.status !== 'complete')
+      fail('INVALID_INPUT', 'Expected coverage SQLite produced by scripts/query.cjs analyze.');
+    const chunksByModule = new Map();
+    for (const row of db.prepare('SELECT module_id,chunk_id FROM module_chunks').iterate()) {
+      if (!chunksByModule.has(row.module_id)) chunksByModule.set(row.module_id, []);
+      chunksByModule.get(row.module_id).push(row.chunk_id);
     }
-    return decode(buffer);
-  } finally { fs.closeSync(fd); }
-}
-function openCoverage(directory) {
-  const datasetFile = path.join(directory, 'dataset.json');
-  const pointerFile = path.join(directory, 'latest.json');
-  const dataset = readJson(datasetFile); const pointer = readJson(pointerFile);
-  if (dataset.schemaVersion !== 1 || dataset.kind !== 'rspack-coverage-agent-data' || pointer.version !== 2 || !/^v2-[a-f0-9]{32}$/.test(pointer.snapshotId))
-    fail('INVALID_INPUT', 'Expected an rspack-coverage Agent data directory.');
-  const snapshot = path.join(directory, 'snapshots', pointer.snapshotId);
-  const metadataFile = path.join(snapshot, 'metadata.json');
-  const metadata = readJson(metadataFile);
-  const reportFile = path.join(snapshot, 'report.json'); const complete = readJson(reportFile);
-  if (metadata.version !== 2 || metadata.snapshotId !== dataset.snapshotId || pointer.snapshotId !== dataset.snapshotId ||
-      pointer.buildHash !== dataset.buildHash || metadata.manifest?.hash !== dataset.buildHash || complete.status !== 'complete' ||
-      complete.id !== dataset.coverageSha256 || complete.report?.buildHash !== dataset.buildHash || complete.report?.version !== 2)
-    fail('INPUT_IDENTITY_MISMATCH', 'Coverage dataset, snapshot and recording identities disagree.');
-  const database = safePath(snapshot, metadata.database.file);
-  if (fs.statSync(database).size !== metadata.database.bytes) fail('INVALID_INPUT', 'Coverage payload database size does not match its metadata.');
-  const detailsFile = path.join(snapshot, 'report.sources');
-  const detailsIndexFile = path.join(snapshot, 'report.sources.index.json');
-  const details = readJson(detailsIndexFile);
-  if (details.version !== 1 || !details.entries) fail('INVALID_INPUT', 'Unsupported coverage source index.');
-  const db = openRead(database);
-  const table = name => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
-  return {
-    kind: 'coverage', directory, db, database, dataset, manifest: metadata.manifest, report: complete.report,
-    detailsFile, details,
-    files: [datasetFile, pointerFile, metadataFile, reportFile, database, detailsFile, detailsIndexFile],
-    build: { hash: dataset.buildHash, context: metadata.manifest.context, compiler: metadata.manifest.compilerName ?? null },
-    graphAvailable: metadata.manifest.capabilities?.exportUsageGraph === 'native' && table('export_usage_edges'),
-    modules() { return metadata.manifest.modules; },
-    detail(fileId) {
-      const detail = readDetail(detailsFile, Object.hasOwn(details.entries, fileId) ? details.entries[fileId] : null);
-      if (detail.id !== fileId) fail('INVALID_INPUT', 'Coverage source identity mismatch.');
-      return detail;
-    },
-    *edges(native = true) {
-      const name = native ? 'export_usage_edges' : 'refs';
-      if (!table(name) || (native && !this.graphAvailable)) return;
-      for (const row of db.prepare(`SELECT payload FROM ${name} ORDER BY sequence`).iterate()) {
-        const edge = decode(row.payload);
-        yield { originalId: edge.id, origin: native ? edge.originModuleId : edge.originId, target: native ? edge.targetModuleId : edge.targetId,
-          originExport: native ? edge.originExport : null, targetExport: native ? edge.targetExport : edge.exports,
-          dependency: edge.dependencyId ?? edge.id, rawLocation: edge.location ?? null,
-          sourcePath: edge.sourcePath ?? null, sourceLocation: edge.sourceLocation ?? null,
-          kind: native ? 'native' : 'module-graph', dependencyType: edge.dependencyType ?? 'export usage', active: edge.active ?? null };
-      }
-    },
-    close() { db.close(); },
-  };
-}
-module.exports = { openCoverage, readDetail };
-
-// The report uses rspack-coverage's source-path normalization, while captured
-// reference locations can retain absolute/loader-prefixed paths. Never use a basename.
-function sourcePathForContext(value, context) {
-  const strip = value => {
-    const index = value.lastIndexOf('!');
-    if (index >= 0 && /^(?:[a-z][a-z\d+.-]*:\/\/|\/|\.\.?\/|[a-z]:[\\/])/i.test(value.slice(index + 1))) value = value.slice(index + 1);
-    return value.split(/[?#]/, 1)[0].replaceAll('\\', '/');
-  };
-  const normalize = value => {
-    let text = strip(value).replace(/^(?:webpack|rspack):\/\/[^/]*\//, '').replace(/^(?:webpack|rspack|file):\/\//, '').replace(/^\/+/, '').replace(/^\.\//, '');
-    while (text.includes('../')) {
-      const next = text.replace(/(^|\/)\.(?:\.\/)+/g, '$1');
-      if (next === text) break;
-      text = next;
+    const modules = db.prepare('SELECT id,identifier,layer,type,resource,provided,used FROM modules').all().map(row => ({ ...row,
+      moduleType: row.type, chunks: chunksByModule.get(row.id) || [], providedExports: decode(row.provided || 'null'), usedExports: decode(row.used || 'null') }));
+    const files = db.prepare('SELECT id,path,space,module_ids,metrics,generated_by_module,retained_by_module FROM coverage_files ORDER BY id').all().map(row => ({
+      id: row.id, path: row.path, coordinateSpace: row.space, moduleIds: decode(row.module_ids), metrics: decode(row.metrics),
+      generatedMetricsById: decode(row.generated_by_module), moduleMetricsById: decode(row.retained_by_module),
+    }));
+    const loadedChunks = new Set(); const unknownChunks = new Set();
+    for (const row of db.prepare('SELECT payload FROM coverage_assets').iterate()) {
+      const asset = decode(row.payload); if (asset.loaded) for (const chunk of asset.chunks) loadedChunks.add(chunk);
+      if (asset.loaded === null) for (const chunk of asset.chunks) unknownChunks.add(chunk);
     }
-    return text || '[unknown source]';
-  };
-  let source = strip(value).replace(/^(?:webpack|rspack):\/\/[^/]*\//, '');
-  if (/^\.\.?\//.test(source)) {
-    const base = strip(context);
-    source = /^[a-z]:\//i.test(base) ? path.win32.resolve(base, source).replaceAll('\\', '/') : base.startsWith('/') ? path.posix.resolve(base, source) : value;
-  } else source = value;
-  source = normalize(source); const base = normalize(context);
-  return source === base ? source.split('/').at(-1) : source.startsWith(`${base}/`) ? source.slice(base.length + 1) : source;
+    const chunks = db.prepare('SELECT id,initial,files,runtime FROM chunks').all().map(row => ({ ...row, initial: Boolean(row.initial), loaded: loadedChunks.has(row.id) ? true : unknownChunks.has(row.id) ? null : false, files: decode(row.files) }));
+    return {
+      kind: 'coverage', db, database: file, files: [file], metadata,
+      build: { hash: metadata.buildHash, context: metadata.context, compiler: metadata.compiler ?? null },
+      dataset: { coverageSha256: metadata.coverageSha256, scenario: metadata.scenario, precision: metadata.precision },
+      graphAvailable: metadata.graphAvailable === true,
+      manifest: { modules, diagnostics: [...(metadata.coverageImportSummary?.warnings || []), ...(metadata.coverageImportSummary?.recordingGaps || [])] },
+      report: { files, chunks, importSummary: metadata.coverageImportSummary || { ignoredEntries: [] } },
+      modules() { return modules; },
+      detail(sourceId) {
+        const row = db.prepare('SELECT id,content,mapped_lines FROM coverage_files WHERE id=?').get(sourceId);
+        if (!row) fail('SOURCE_UNAVAILABLE', 'Unknown analyzed source.');
+        return { id: row.id, content: row.content, mappedLines: decode(row.mapped_lines) };
+      },
+      *edges(native = true) {
+        if (native && !this.graphAvailable) return;
+        for (const row of db.prepare(native ? 'SELECT * FROM edges ORDER BY id' : 'SELECT * FROM refs ORDER BY id').iterate()) yield {
+          originalId: row.id, origin: row.origin, target: row.target, originExport: native ? decode(row.origin_export) : null,
+          targetExport: native ? decode(row.target_export) : null, dependency: native ? row.dependency : row.id,
+          rawLocation: native ? row.loc : decode(row.loc || 'null'), sourcePath: null, sourceLocation: null,
+          kind: native ? 'native' : 'module-graph', dependencyType: native ? 'export usage' : row.dependency_type, active: native || row.active === null ? null : Boolean(row.active),
+        };
+      },
+      close() { db.close(); },
+    };
+  } catch (error) { db.close(); throw error; }
 }
-module.exports.sourcePathForContext = sourcePathForContext;
+module.exports = { openCoverage, sourcePathForContext };

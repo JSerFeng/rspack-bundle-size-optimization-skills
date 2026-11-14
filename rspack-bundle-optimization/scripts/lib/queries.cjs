@@ -32,8 +32,8 @@ function coverageSummary(ctx, moduleId) {
   const currentScope = scope(ctx);
   const row = ctx.db.prepare('SELECT * FROM metrics WHERE module_id=? AND scope=?').get(moduleId, currentScope);
   return { available: true, runId: ctx.meta.coverageRunId, scope: currentScope, generated: metrics(row, 'g'), retainedSource: metrics(row, 's'),
-    generatedAttribution: row?.ge === null ? 'unknown-or-shared-source' : 'exclusive-source-paths',
-    metricBasis: { generated: 'final-JavaScript-UTF8-bytes', retainedSource: 'retained-original-source-line-UTF8-bytes' } };
+    generatedAttribution: row?.ge === null ? 'unknown-or-shared-source' : 'captured-source-and-chunk-membership',
+    metricBasis: { generated: 'final-JavaScript-UTF8-bytes', retainedSource: 'retained-mapped-source-line-UTF8-bytes' } };
 }
 function usageSummary(row) { return { incomingReferences: row.incoming, distinctConsumers: row.consumers, usedExportCount: row.used_count }; }
 function compactModule(row) {
@@ -118,7 +118,11 @@ function queryCoverage(ctx) {
   if (view === 'ranges') fail('FEATURE_UNAVAILABLE', 'This input stores source-line evidence, not generated offset-to-source ranges.', { supportedViews: ['summary', 'lines'] });
   if (view !== 'lines') fail('INVALID_ARGUMENT', 'Unknown coverage view.');
   const where = ['l.module_id=?']; const params = [module.id];
-  if (ctx.args.source) { require('./source.cjs').sourceRow(ctx, ctx.args.source); where.push('l.source_id=?'); params.push(ctx.args.source); }
+  if (ctx.args.source) {
+    const source = require('./source.cjs'); const row = source.sourceRow(ctx, ctx.args.source);
+    const ids = [...new Set([row.id, ...source.coverageSourceIds(ctx, row)])];
+    where.push(`l.source_id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
+  }
   if (currentScope === 'loaded') where.push('l.gl>0');
   if (ctx.args.state) {
     if (!['executed', 'unexecuted', 'not-loaded', 'unknown'].includes(ctx.args.state)) fail('INVALID_ARGUMENT', 'Unknown coverage state.');
@@ -196,8 +200,13 @@ function runQuery(ctx) {
   scope(ctx);
   if (ctx.command === 'status') return { compiler: ctx.meta.compiler, context: ctx.meta.context, scenario: ctx.meta.scenario, coveragePrecision: ctx.meta.coveragePrecision,
     capabilities: { coverage: ctx.meta.coverageAvailable, nativeUsage: ctx.meta.graphAvailable, coverageViews: ctx.meta.coverageAvailable ? ['summary', 'lines'] : [], scopes: ctx.meta.scopes },
-    counts: ctx.meta.counts, inputs: ctx.meta.inputs.map(input => ({ path: input.path, bytes: Number(input.size) })),
-    semantics: { generated: 'final emitted JavaScript UTF-8 bytes', retainedSource: 'retained original-source line UTF-8 bytes', graph: 'compile-time relations, not a runtime call graph', unknown: 'null, never zero or unused', scope: 'initial compiler assets and loaded recording assets are different sets' } };
+    counts: ctx.meta.counts, generated: ctx.meta.coverageTotals ?? null, recording: ctx.meta.coverageImportSummary ? {
+      matchedAssets: ctx.meta.coverageImportSummary.matchedAssets,
+      ignoredScripts: ctx.meta.coverageImportSummary.ignoredEntries?.length || 0,
+      mappingWarnings: ctx.meta.coverageImportSummary.warnings?.length || 0,
+      scopeGaps: ctx.meta.coverageImportSummary.recordingGaps?.length || 0,
+    } : null, inputs: ctx.meta.inputs.map(input => ({ path: input.path, bytes: Number(input.size) })),
+    semantics: { generated: 'final emitted JavaScript UTF-8 bytes', retainedSource: 'retained captured map-source line UTF-8 bytes', graph: 'compile-time relations, not a runtime call graph', unknown: 'null, never zero or unused', scope: 'initial compiler assets and observed recording scripts are different sets' } };
   if (ctx.command === 'modules') return queryModules(ctx);
   if (ctx.command === 'module') return queryModule(ctx);
   if (ctx.command === 'exports') return queryExports(ctx);
@@ -214,12 +223,13 @@ function runQuery(ctx) {
     const source = require('./source.cjs'); const row = source.sourceRow(ctx, required(ctx.args, 'source'));
     const value = source.loadSource(row, ctx.args['map-source']);
     const result = { sourceId: row.id, moduleId: ctx.args.module ?? null, ...source.sourceWindow(value, ctx.args) };
-    if (ctx.args.module && value.space === 'resource') {
-      const params = [ctx.args.module, row.id, result.start.line, result.end.line];
-      const where = 'module_id=? AND source_id=? AND line BETWEEN ? AND ?';
+    if (ctx.args.module && ['resource', 'map-source'].includes(value.space)) {
+      const sourceIds = [...new Set([row.id, ...source.coverageSourceIds(ctx, value)])];
+      const params = [ctx.args.module, ...sourceIds, result.start.line, result.end.line];
+      const where = `module_id=? AND source_id IN (${sourceIds.map(() => '?').join(',')}) AND line BETWEEN ? AND ?`;
       const total = ctx.db.prepare(`SELECT count(*) AS n FROM coverage_lines WHERE ${where}`).get(...params).n;
       const items = ctx.db.prepare(`SELECT line,state,ge,gl,gx,gu FROM coverage_lines WHERE ${where} ORDER BY line LIMIT 20`).all(...params);
-      result.coverage = { items, total, nextQuery: total > items.length ? { command: 'coverage', module: ctx.args.module, source: row.id, view: 'lines', sort: 'line:asc' } : null };
+      result.coverage = { items, total, sourceIds, nextQuery: total > items.length ? { command: 'coverage', module: ctx.args.module, source: row.id, view: 'lines', sort: 'line:asc' } : null };
     }
     return result;
   }

@@ -3,6 +3,8 @@
 状态：第一版已在 `rspack-bundle-optimization/scripts/` 实现。实际调用见
 [query-cli.md](../rspack-bundle-optimization/references/query-cli.md)。当前支持 build/loaded
 及 source-line coverage；initial 独立字节和精确 generated ranges 缺少底层数据，明确报不可用。
+0.2 版进一步自包含：内置 capture-plugin、Chrome CDP recorder 和 analyze，直接读取
+本次构建快照及原始 coverage；采集、映射和查询均由 scripts 完成。
 
 ## 目标与职责
 
@@ -19,8 +21,14 @@ CLI 负责可重复的数据处理：索引、关联、筛选、排序、分页�
 rspack-bundle-optimization/
   SKILL.md
   scripts/
+    capture-plugin.cjs
+    record.cjs
     query.cjs
     lib/
+      capture-store.cjs
+      cdp.cjs
+      coverage.cjs
+      analyze.cjs
       index.cjs
       queries.cjs
       source.cjs
@@ -42,8 +50,8 @@ lockfile 安装，不依赖开发者机器的全局包或绝对仓库路径。
 
 接入已有两类证据，允许单独使用：
 
-1. coverage adapter：读取 `rspack-coverage` Agent 数据目录中的 `dataset.json`、固定的
-   构建快照、coverage report 和源码详情侧文件。目录本身已有原生 usage 图时直接复用。
+1. coverage adapter：读取内置 analyze 输出的自包含 coverage SQLite，内含构建、录制、
+   sourcemap、源码行指标及模块关系。映射逻辑不依赖外部分析器。
 2. usage adapter：读取独立的 usage SQLite 快照及构建时源码/map，供没有浏览器录制的
    纯编译期分析使用。索引时检查 schema、complete 状态及 graphAvailable。
 
@@ -53,6 +61,7 @@ lockfile 安装，不依赖开发者机器的全局包或绝对仓库路径。
 
 ```sh
 # <skill>、<coverage-data> 等需替换为真实路径。
+node <skill>/scripts/query.cjs analyze --build <build.sqlite> --coverage <recording.json> --out <coverage-data.sqlite>
 node <skill>/scripts/query.cjs index --coverage <coverage-data> --out <index.sqlite>
 node <skill>/scripts/query.cjs index --usage <usage.sqlite> --out <index.sqlite>
 node <skill>/scripts/query.cjs index --coverage <coverage-data> --usage <usage.sqlite> --out <index.sqlite>
@@ -208,9 +217,9 @@ node <skill>/scripts/query.cjs modules --db <index.sqlite> --run <run-id> --scop
    `unexecuted` 不证明整个应用无需实现，也不代表可节省 gzip。
 2. 若输入以后保留 generated asset/offset 与 source/range 的关联，ranges 才能开放，并须
    标注偏移单位、文本 hash 和映射精度。当前只开放行级证据，原始代码与 post-loader 坐标不混用。
-3. 当前 coverage report 的 `metrics` 是生成字节，`moduleMetrics` 是源码行字节；同一
-   source 对应多个 module 实例时，生成指标可能不能唯一归因。此时模块指标为 null，
-   保留共享 source 证据及关联实例，不按比例摊分或在多个模块上重复累计。
+3. 生成字节与保留映射源码行字节分开统计；同一 source 对应多个 module 实例时，用具体
+   asset/chunk 归属核对。仍不能唯一归因的指标为 null，保留共享 source 及关联实例，
+   不按比例摊分或重复累计。Network 观察到、但未捕获脚本文本/coverage 的资源也保留未知。
 4. 目前已有的原始源码行状态不能还原成精确的函数/区块执行状态。输入只有行级映射时，
    提供 `coverage --view lines`；请求 ranges 而无底层区间时返回不可用。需要更精细的
    generated ranges 或 asset 级范围排序，须让 coverage 输出侧保留这些事实。

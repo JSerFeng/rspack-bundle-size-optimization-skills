@@ -1,58 +1,105 @@
 # 数据抓取
 
-内置 CLI 查询时，使用 [query-cli.md](query-cli.md#准备和输入)
-
-## 导出使用与源码上下文
-
-Rspack 的内置 RsdoctorPlugin 提供了 exportUsageGraph 数据，用于分析模块的导出使用情况，用 [查询 CLI](query-cli.md) 按模块或导出查询 references/chain，再用 reference 查询消费处及语法归属。
-
-分析时结合导入方源码、包元数据、图中的边和输出产物。位置与源码不匹配、源码缺失或解析
-不完整时，记录受影响的结论；不要仅根据导出名或原始业务源码猜测引用关系。
-
-## 浏览器运行数据（按需）
-
-用户关心页面或交互实际加载、执行的代码时，再采集浏览器网络请求和 Chrome/V8 精确覆盖率。
-记录页面、操作步骤、采集时机和目标范围；分析首屏时应在导航前启动采集。
-
-coverage 默认采用无报告 UI 的数据流程：保存录制，将覆盖率关联到浏览器执行的同一份
-脚本文本，再输出可查询的数据目录。应用本身仍可在浏览器运行；数据分析不依赖报告页面、
-截图、颜色高亮或人工点击。已有正确录制与映射时直接复用。
-
-使用支持 Agent CLI 的 `rspack-coverage` 时：
-
-```js
-new RspackCoveragePlugin({ server: false, dataDir: '/absolute/path/to/web-build-data' });
-```
-
-运行项目 production command，保存成功构建。插件会报告分析所需的配置调整；如它改变了
-生产优化设置，将其标为诊断构建，不把其体积当作正常生产收益。
-按现有采集方式获得 Chrome Coverage JSON 后：
+构建采集、浏览器 coverage 录制、sourcemap 分析及按需查询均由 Skill 的 scripts 提供。
+需要 Node >=22.13；运行依赖安装在 Skill 内，被分析项目继续使用自己的 Rspack。
 
 ```sh
-rspack-coverage analyze --help
-rspack-coverage analyze --data-dir /absolute/path/to/web-build-data \
-  --coverage /absolute/path/to/Coverage.json --output /absolute/path/to/first-screen-data \
-  --scenario first-screen --precision per-block
-node <skill>/scripts/query.cjs index --coverage /absolute/path/to/first-screen-data \
-  --out /absolute/path/to/first-screen.sqlite
-node <skill>/scripts/query.cjs status --db /absolute/path/to/first-screen.sqlite
-node <skill>/scripts/query.cjs modules --db /absolute/path/to/first-screen.sqlite \
-  --scope loaded --sort coverage.generated.unexecutedBytes:desc --limit 20
+npm ci --prefix <skill>/scripts --omit=dev
+node <skill>/scripts/query.cjs describe
 ```
 
-CLI 的依赖安装及后续查询见 [query-cli.md](query-cli.md)。先确认当前 rspack-coverage 版本
-支持 analyze；Skill 的 query.cjs 不会为旧版本补上导出接口。`--precision` 应与录制方式相符，
-不清楚时保持 `unknown`。旧工具缺少这些接口时，按下述约定编写数据适配工具，不能假定
-`serve --no-open` 已经提供无服务进程的数据输出。
+## 保存同一次构建的证据
 
-数据交付采用三层，原始脚本、录制、map 和大图保留在磁盘：
+在项目最终生效的 Rspack 配置 hook 中临时追加内置插件。Rspack 配置示例：
 
-| 数据 | Agent 默认读取的内容 |
-| --- | --- |
-| 摘要 | schema 版本、build/snapshot/录制身份、场景、精度、匹配数量、统计口径及证据缺口 |
-| 分页索引 | 按未执行字节排序的 source/module，稳定 ID、资源归属、执行统计；不含整份源码和全图 |
-| 单项详情 | 按 ID 查询导出、直接引用、export chain 和带位置的源码窗口；返回下一页或待续查分支 |
+```js
+const { BundleEvidencePlugin } = require('/absolute/path/to/skill/scripts/capture-plugin.cjs');
 
-所有后续查询使用 Skill 的 `query.cjs <command> --db <index.sqlite>`，module/source/edge ID
-均从该索引查询获得，不混用原工具的 ID。按 module、coverage、references/reference 逐步
-展开；源码按 next 续读，chain 按 frontier 续查。完整选项从 describe 或查询说明读取。
+// 追加到原有 plugins；Rsbuild/Rspeedy 在最终 Rspack 配置 hook 中接入。
+plugins: [new BundleEvidencePlugin({ directory: '/absolute/path/to/build-evidence' })]
+```
+
+运行真实 production command。插件为每次成功构建保存独立 SQLite，并在 directory 的
+latest.json 中记录 file/buildHash；stderr 也输出完整路径。每个 compiler 用独立目录。
+失败构建不发布 complete 快照，不能沿用旧 latest 冒充新结果。
+
+快照包含产物全文与 hash、asset sourcemap、模块完整 identifier/layer、构建时源码及
+loader map、chunk 归属、chunk group/origin、module graph 和可用的原生 export usage graph。
+插件保留项目优化设置，不关闭 minify、模块拼接或 tree-shaking；缺少原生图时声明不可用。
+若按 SKILL 的 export usage 诊断步骤关闭 concatenateModules，另存该诊断构建及其浏览器录制，
+不与保留原配置的生产基线混用；插件本身不会替 agent 改动此开关。
+
+源码归因需要完整 sourcemap。已有 source-map/hidden-source-map 时直接捕获；未生成时
+可临时使用 devtool: 'hidden-source-map'。插件不自动修改该配置，缺图时保留生成字节并报告
+映射缺口。最终收益比较使用可比生产配置；分析结束移除临时插件和项目不需要的 map 设置。
+
+## 浏览器首屏录制
+
+页面导航、登录、操作、网络和 Performance trace 可使用已有 Chrome DevTools MCP 或 CLI。
+精确 coverage 使用 scripts/record.cjs 连接同一个已开启远程调试的 Chrome，不需要 Puppeteer。
+从 Chrome 的调试连接配置或 DevToolsActivePort 获取 endpoint，不猜端口，不另开一套登录会话。
+
+```sh
+node <skill>/scripts/record.cjs --help
+node <skill>/scripts/record.cjs --endpoint http://127.0.0.1:<debug-port> \
+  --url http://localhost:<app-port>/ \
+  --ready-selector '[data-first-screen-ready]' \
+  --out /absolute/path/to/recording.json --scenario first-screen
+```
+
+endpoint 也可传页面 WebSocket URL。多个页面时用 --target <CDP-target-id> 选择，选择错误
+会返回可用页面列表；CDP target ID 与 MCP 的 pageId 不同。
+--ready-expression 'globalThis.appReady === true' 可替代 selector，必须明确一种首屏完成条件。
+不要用未校验的固定等待时间代替业务就绪条件。默认超时 30 秒，--timeout 单位毫秒。
+
+脚本在新文档导航前启动 per-block coverage 和网络监听，就绪后保存实际脚本文本、原始
+V8 计数、请求清单、浏览器版本、采集边界及缺口。超时不写 complete 录制。
+默认 --cache cold 只禁用 HTTP cache；warm 保留 HTTP cache，不清理登录、Service Worker
+或 CacheStorage。记录实际环境，不把它自动称为全新浏览器的冷启动。
+
+录制范围是选定页面的 JS isolate，暂不包含 worker 和跨进程 iframe，录制中会记录此缺口。
+Network 中出现、但没有捕获到实际脚本文本/coverage 的资源，加载与执行归因为 unknown，
+不能因为 coverage 中缺席就判为零执行。loaded 查询范围采用可确认的脚本观察。
+precise coverage 会影响 V8 的优化执行，正常性能耗时另录一轮 trace，不混用为性能基线。
+已有 Chrome Coverage JSON（url/text/ranges）可直接复用，无需重新录制。
+
+## 内置分析和查询
+
+```sh
+node <skill>/scripts/query.cjs analyze --build <build.sqlite> \
+  --coverage /absolute/path/to/recording.json --out /absolute/path/to/coverage.sqlite
+node <skill>/scripts/query.cjs index --coverage /absolute/path/to/coverage.sqlite \
+  --out /absolute/path/to/index.sqlite
+node <skill>/scripts/query.cjs status --db /absolute/path/to/index.sqlite
+node <skill>/scripts/query.cjs modules --db /absolute/path/to/index.sqlite --scope loaded \
+  --sort coverage.generated.unexecutedBytes:desc --limit 20
+```
+
+analyze 直接处理内置录制或 Chrome Coverage JSON，核对 URL 与脚本文本 SHA-256，读取同一
+构建的 sourcemap，将生成区间映射到 source/行，并计算加载、执行和未执行字节。
+同名 URL 的文本不匹配构建时拒绝分析。第三方脚本单独记录，不强行归入项目模块。
+原始 V8 的零执行子区间覆盖外层正计数；重复采样的执行范围取并集，不重复累计。
+
+coverage.sqlite 自带捕获的产物、图、源码、map 和录制，后续不依赖原构建快照目录。
+stdout 返回身份、计数、字节摘要及下一步查询入口，大数据留在 SQLite。
+对于旧的平面 Coverage JSON，--precision per-block/per-function 必须与实际采集方式一致，
+不清楚则保持 unknown；该参数不会把函数级录制变成区块级精度。
+
+源码归因以完整路径、文本身份和 chunk 归属关联模块；共享 source 无法唯一归因时返回
+null，不按比例摊分。asset map 若只指向 loader 中间产物，会保留 map-source 坐标空间；
+不把文件名像 TS/TSX 当作已验证的原始源码映射。
+
+只调查编译期导出时，无需录制和 analyze：
+
+```sh
+node <skill>/scripts/query.cjs index --usage <build.sqlite> --out <index.sqlite>
+```
+
+## 按需分析
+
+具体选项见 [query-cli.md](query-cli.md)。先确认 status 的构建身份、场景、scope、统计口径和
+数据缺口，再按模块、coverage 行、导出、直接引用、chain 和源码逐层查询。
+
+原生图反映编译期关系，源码语法 owner 只表明归属，不是运行时调用证明。未执行不等于可删。
+生成 JS UTF-8 字节与保留映射源码行字节分别报告；检查 coordinateSpace、hash 和映射缺口。
+源码按 next 续读，列表按 cursor、图按 frontier 续查，避免把完整源码和大图放进上下文。
