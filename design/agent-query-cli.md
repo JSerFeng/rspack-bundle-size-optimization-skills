@@ -1,10 +1,10 @@
 # Skill 本地查询 CLI 设计
 
-状态：第一版已在 `rspack-bundle-optimization/scripts/` 实现。实际调用见
-[query-cli.md](../rspack-bundle-optimization/references/query-cli.md)。当前支持 build/loaded
-及 source-line coverage；initial 独立字节和精确 generated ranges 缺少底层数据，明确报不可用。
-0.2 版进一步自包含：内置 capture-plugin、Chrome CDP recorder 和 analyze，直接读取
-本次构建快照及原始 coverage；采集、映射和查询均由 scripts 完成。
+状态：已在 `rspack-bundle-optimization/scripts/` 实现并完成 AI 友好输出改造（0.3 版）。实际调用见
+[query-cli.md](../rspack-bundle-optimization/references/query-cli.md)。CLI 收口为 8 个核心命令
+（`index`/`status`/`chunks`/`modules`/`module`/`source`/`refs`/`chain`），默认输出面向 AI 阅读的紧凑文本
+（`--format text`，带相对路径、行号与内联覆盖率、以及 map 回原始源码后的使用处代码片段），保留 `--format json`
+供程序消费；支持一步 `index --build --coverage`、Chunk Group 多 origin 可达性分析、覆盖率/使用状态筛选和同源源码去重。
 
 ## 目标与职责
 

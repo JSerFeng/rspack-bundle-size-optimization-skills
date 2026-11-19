@@ -27,7 +27,7 @@ class BundleEvidencePlugin {
       const run = `${Date.now()}-${randomUUID()}`;
       const pending = path.join(directory, `${run}.incomplete.sqlite`); const final = path.join(directory, `${run}.sqlite`);
       const db = createCapture(pending, { context: fs.realpathSync(compiler.context), compiler: compiler.name || compiler.options.name || null,
-        rspackVersion: compiler.webpack.rspackVersion || null, run, columnBase: 1, locationSpace: this.options.locationSpace || 'auto',
+        rspackVersion: compiler.webpack.rspackVersion || null, run, columnBase: 1, locationSpace: this.options.locationSpace || 'post-loader',
         optimization: Object.fromEntries(['usedExports', 'innerGraph', 'sideEffects', 'concatenateModules', 'minimize'].map(key => [key, compiler.options.optimization?.[key] ?? null])) });
       const state = { db, pending, final, closed: false }; captures.set(compilation, state); active = state;
       const visit = (module, parent, seen, captureText) => {
@@ -136,9 +136,12 @@ class BundleEvidencePlugin {
           }
         }
         for (const module of compilation.modules) update(module);
-        for (const [i, group] of [...compilation.chunkGroups].entries()) {
+        const groups = [...compilation.chunkGroups];
+        const groupId = new Map(groups.map((group, i) => [group, String(group.id ?? i)]));
+        for (const group of groups) {
           const origins = [...(group.origins || [])].map(origin => ({ moduleId: origin.module ? ensureModule(db, origin.module.identifier(), origin.module.layer) : null, request: origin.request ?? null, location: origin.loc ?? null }));
-          prepare(db, 'INSERT INTO chunk_groups VALUES (?,?,?,?)').run(String(group.id ?? i), json(group.chunks.map(chunk => String(chunk.id))), json(origins), json(safely(() => group.getParents(), []).map(parent => String(parent.id))));
+          const parents = safely(() => [...group.getParents()], []).map(parent => groupId.get(parent)).filter(Boolean);
+          prepare(db, 'INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run(groupId.get(group), json(group.chunks.map(chunk => String(chunk.id))), json(origins), json(parents), group.name ?? null);
         }
         setMeta(db, { status: 'complete', buildHash: stats.hash, completedAt: new Date().toISOString(), outputPath: compiler.options.output?.path ?? null });
         db.exec('COMMIT'); db.close(); state.closed = true;

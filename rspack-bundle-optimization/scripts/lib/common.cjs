@@ -13,15 +13,37 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const id = (kind, value) => `${kind}_${hash(JSON.stringify(value)).slice(0, 24)}`;
 const json = value => JSON.stringify(value);
 const decode = value => JSON.parse(Buffer.isBuffer(value) || value instanceof Uint8Array ? Buffer.from(value).toString('utf8') : String(value));
-function integer(value, fallback, max = Number.MAX_SAFE_INTEGER, min = 0) {
+function integer(value, fallback, max = Number.MAX_SAFE_INTEGER, min = 0, name) {
   if (value === undefined) return fallback;
   if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max)
-    fail('INVALID_ARGUMENT', `Expected an integer in ${min}..${max}.`);
+    fail('INVALID_ARGUMENT', `${name ? `--${name} must be` : 'Expected'} an integer in ${min}..${max}.`);
   return Number(value);
+}
+function float(value, fallback, max = Number.POSITIVE_INFINITY, min = Number.NEGATIVE_INFINITY, name) {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (String(value).trim() === '' || !Number.isFinite(parsed) || parsed < min || parsed > max)
+    fail('INVALID_ARGUMENT', `${name ? `--${name} must be` : 'Expected'} a number in ${min}..${max}.`);
+  return parsed;
+}
+function displayPath(value, context) {
+  if (typeof value !== 'string' || !value) return value ?? null;
+  let text = value.replaceAll('\\', '/');
+  if (text.startsWith('webpack://')) {
+    text = text.replace(/^webpack:\/\/[^/]*\//, '');
+    if (text.startsWith('./')) text = text.slice(2);
+  }
+  if (context && path.isAbsolute(text)) {
+    const base = path.resolve(context).replaceAll('\\', '/').replace(/\/+$/, '');
+    if (text === base) return '.';
+    if (text.startsWith(`${base}/`)) return text.slice(base.length + 1);
+  }
+  return text;
 }
 function readJson(file, max = 256 * 1024 * 1024) {
   if (fs.statSync(file).size > max) fail('INPUT_TOO_LARGE', `JSON record exceeds ${max} bytes: ${file}`);
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { fail('INVALID_INPUT', `Expected a valid JSON file: ${file}`); }
 }
 function signature(file) {
   const real = fs.realpathSync(file);
@@ -59,7 +81,7 @@ function openIndex(file) {
   const db = openRead(file);
   try {
     const m = meta(db);
-    if (m.schemaVersion !== 2 || m.status !== 'complete' || m.kind !== 'rspack-bundle-query') fail('INVALID_INDEX', 'Unsupported or incomplete query index. Rebuild with this version of index.');
+    if (m.schemaVersion !== 3 || m.status !== 'complete' || m.kind !== 'rspack-bundle-query') fail('INVALID_INDEX', 'Unsupported or incomplete query index. Rebuild with this version of index.');
     verifyInputs(m.inputs);
     return { db, meta: m };
   } catch (error) { db.close(); throw error; }
@@ -92,13 +114,13 @@ function sortTerms(raw, allowed, fallback = 'id:asc') {
   return terms;
 }
 function paginate(ctx, spec) {
-  const limit = integer(ctx.args.limit, 20, 200, 1);
+  const limit = integer(ctx.args.limit, spec.defaultLimit ?? 20, 200, 1, 'limit');
   const terms = sortTerms(ctx.args.sort, spec.sort, spec.defaultSort);
   const dimensions = terms.flatMap(term => [
     { expression: `(${term.expression} IS NULL)`, direction: 'asc' },
     { expression: term.expression, direction: term.direction },
   ]);
-  const fp = fingerprint({ dataset: ctx.meta.datasetId, command: spec.command || ctx.command, args: Object.fromEntries(Object.entries(ctx.args).filter(([key]) => !['db', 'cursor', 'limit'].includes(key))) });
+  const fp = fingerprint({ dataset: ctx.meta.datasetId, command: spec.command || ctx.command, args: Object.fromEntries(Object.entries(ctx.args).filter(([key]) => !['db', 'cursor', 'limit', 'format', 'no-code', 'context'].includes(key))) });
   const base = spec.where || '1';
   const params = spec.params || [];
   const total = ctx.db.prepare(`SELECT count(*) AS n ${spec.from} WHERE ${base}`).get(...params).n;
@@ -119,12 +141,13 @@ function paginate(ctx, spec) {
   }
   const extra = dimensions.map((dim, i) => `${dim.expression} AS __key${i}`).join(',');
   const rows = ctx.db.prepare(`SELECT ${spec.select},${extra} ${spec.from} WHERE ${base}${seek} ORDER BY ${dimensions.map(dim => `${dim.expression} ${dim.direction}`).join(',')} LIMIT ?`).all(...params, ...seekParams, limit + 1);
+  const budget = spec.budget ?? 20 * 1024;
   const items = []; let bytes = 0; let consumed = 0;
   for (const row of rows.slice(0, limit)) {
     const item = spec.map(row);
     const size = Buffer.byteLength(json(item));
-    if (bytes + size > 20 * 1024 && items.length) break;
-    if (size > 20 * 1024) fail('RECORD_TOO_LARGE', 'One record exceeds the output budget. Request fewer fields or a smaller source window.');
+    if (bytes + size > budget && items.length) break;
+    if (size > budget) fail('RECORD_TOO_LARGE', 'One record exceeds the output budget. Request fewer fields or a smaller source window.');
     items.push(item); bytes += size; consumed++;
   }
   const hasNext = consumed < rows.length;
@@ -140,4 +163,4 @@ function exportPath(args) {
   if (!Array.isArray(value) || !value.length || !value.every(item => typeof item === 'string' && item.length)) fail('INVALID_ARGUMENT', 'Expected a nonempty array of export names.');
   return value;
 }
-module.exports = { fs, path, fail, hash, id, json, decode, integer, readJson, signature, verifyInputs, safePath, openRead, meta, setMeta, openIndex, fingerprint, encodeCursor, decodeCursor, paginate, exportPath };
+module.exports = { fs, path, fail, hash, id, json, decode, integer, float, displayPath, readJson, signature, verifyInputs, safePath, openRead, meta, setMeta, openIndex, fingerprint, encodeCursor, decodeCursor, paginate, exportPath };

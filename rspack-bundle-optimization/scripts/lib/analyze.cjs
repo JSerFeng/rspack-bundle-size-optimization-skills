@@ -3,10 +3,9 @@ const { fs, path, fail, hash, id, json, readJson, signature, verifyInputs, openR
 const { canonicalSource, sourcePathForContext, lineStarts, utf8Prefix, mergeRanges, coveredRanges, generatedSpans, byteMetrics, addBytes } = require('./coverage.cjs');
 
 function urlPath(value) { try { return decodeURIComponent(new URL(value, 'http://capture.local').pathname); } catch { return value.split(/[?#]/, 1)[0]; } }
-function analyze(args) {
-  if (!args.build || !args.coverage || !args.out) fail('INVALID_ARGUMENT', 'analyze requires --build, --coverage, and --out.');
-  const build = path.resolve(args.build); const recording = path.resolve(args.coverage); const output = path.resolve(args.out);
-  if (fs.existsSync(output)) fail('OUTPUT_EXISTS', 'Choose a new analysis output path.');
+
+function computeAnalysis(args) {
+  const build = path.resolve(args.build); const recording = path.resolve(args.coverage);
   const inputs = [signature(build), signature(recording)];
   const raw = readJson(recording, 128 * 1024 * 1024); const envelope = Array.isArray(raw) ? null : raw;
   if (envelope && (envelope.kind !== 'rspack-browser-recording' || envelope.schemaVersion !== 1 || envelope.status !== 'complete')) fail('INVALID_INPUT', 'Expected a complete browser recording or Chrome Coverage JSON array.');
@@ -15,7 +14,7 @@ function analyze(args) {
   const precision = args.precision || envelope?.precision || 'unknown';
   if (!['per-block', 'per-function', 'unknown'].includes(precision)) fail('INVALID_ARGUMENT', 'Invalid coverage precision.');
   if (envelope?.precision && args.precision && envelope.precision !== args.precision) fail('INPUT_IDENTITY_MISMATCH', 'Requested precision disagrees with recording metadata.');
-  const input = openRead(build); let db; const pending = `${output}.${process.pid}.${Date.now()}.incomplete`;
+  const input = openRead(build);
   try {
     const metadata = meta(input);
     if (metadata.kind !== 'rspack-bundle-capture' || metadata.schema !== 1 || metadata.status !== 'complete' || !metadata.buildHash || !metadata.context)
@@ -104,31 +103,58 @@ function analyze(args) {
       }
       return result;
     };
-    verifyInputs(inputs); fs.mkdirSync(path.dirname(output), { recursive: true }); fs.copyFileSync(build, pending, fs.constants.COPYFILE_EXCL);
+    const fileRecords = [...files.values()].map(file => {
+      const moduleIds = [...file.moduleIds]; const knownHash = file.content === null ? null : hash(file.content);
+      const verifiedOriginal = knownHash !== null && moduleIds.some(key => modulesById.get(key)?.resource_hash === knownHash);
+      const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => ({ lineIndex: line.lineIndex,
+        emittedBytes: line.emittedBytes, loadedBytes: line.loadedBytes, executedBytes: line.executedBytes, ranges: line.ranges,
+        moduleStates: Object.fromEntries(moduleIds.filter(key => !line.ambiguous.has(key)).map(key => [key, line.states.get(key) || byteMetrics()])) }));
+      return { id: file.id, path: file.path, coordinateSpace: verifiedOriginal ? 'resource' : 'map-source', content: file.content, moduleIds,
+        metrics: file.metrics,
+        generatedMetricsById: Object.fromEntries(moduleIds.map(key => [key, file.ambiguous.has(key) ? null : file.perModule.get(key) || byteMetrics()])),
+        moduleMetricsById: Object.fromEntries(moduleIds.map(key => [key, retainedMetrics(file, key)])),
+        mappedLines: lines };
+    });
+    const recordingSha256 = hash(fs.readFileSync(recording));
+    const coverageMeta = {
+      kind: 'rspack-bundle-coverage', coverageSchema: 1, coverageSha256: recordingSha256,
+      scenario: args.scenario || envelope?.scenario || 'unspecified', precision,
+      coverageTotals: totals,
+      coverageImportSummary: { matchedAssets: matched.size, ignoredEntries: ignored, warnings, recordingGaps: envelope?.gaps || [] },
+    };
+    verifyInputs(inputs);
+    return { build, recording, inputs, raw, envelope, metadata, assets, matched, ignored, warnings, totals, assetReports, fileRecords, coverageMeta };
+  } finally { input.close(); }
+}
+
+function analyze(args) {
+  if (!args.build || !args.coverage || !args.out) fail('INVALID_ARGUMENT', 'analyze requires --build, --coverage, and --out.');
+  const output = path.resolve(args.out);
+  if (fs.existsSync(output)) fail('OUTPUT_EXISTS', 'Choose a new analysis output path.');
+  const analyzed = computeAnalysis(args);
+  const pending = `${output}.${process.pid}.${Date.now()}.incomplete`;
+  let db;
+  try {
+    fs.mkdirSync(path.dirname(output), { recursive: true }); fs.copyFileSync(analyzed.build, pending, fs.constants.COPYFILE_EXCL);
     db = new DatabaseSync(pending); db.exec(`BEGIN;
       CREATE TABLE coverage_files(id TEXT PRIMARY KEY,path TEXT,space TEXT,content TEXT,module_ids TEXT,metrics TEXT,generated_by_module TEXT,retained_by_module TEXT,mapped_lines TEXT);
       CREATE TABLE coverage_assets(id TEXT PRIMARY KEY,payload TEXT);
       CREATE TABLE recordings(id TEXT PRIMARY KEY,payload TEXT);
     `);
     const insertFile = db.prepare('INSERT INTO coverage_files VALUES (?,?,?,?,?,?,?,?,?)');
-    for (const file of files.values()) {
-      const moduleIds = [...file.moduleIds]; const knownHash = file.content === null ? null : hash(file.content);
-      const verifiedOriginal = knownHash !== null && moduleIds.some(key => modulesById.get(key)?.resource_hash === knownHash);
-      const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => ({ lineIndex: line.lineIndex,
-        emittedBytes: line.emittedBytes, loadedBytes: line.loadedBytes, executedBytes: line.executedBytes, ranges: line.ranges,
-        moduleStates: Object.fromEntries(moduleIds.filter(key => !line.ambiguous.has(key)).map(key => [key, line.states.get(key) || byteMetrics()])) }));
-      insertFile.run(file.id, file.path, verifiedOriginal ? 'resource' : 'map-source', file.content, json(moduleIds), json(file.metrics),
-        json(Object.fromEntries(moduleIds.map(key => [key, file.ambiguous.has(key) ? null : file.perModule.get(key) || byteMetrics()]))),
-        json(Object.fromEntries(moduleIds.map(key => [key, retainedMetrics(file, key)]))), json(lines));
+    for (const file of analyzed.fileRecords) {
+      insertFile.run(file.id, file.path, file.coordinateSpace, file.content, json(file.moduleIds), json(file.metrics),
+        json(file.generatedMetricsById), json(file.moduleMetricsById), json(file.mappedLines));
     }
-    const insertAsset = db.prepare('INSERT INTO coverage_assets VALUES (?,?)'); for (const asset of assetReports) insertAsset.run(asset.id, json(asset));
-    const recordingSha256 = hash(fs.readFileSync(recording)); db.prepare('INSERT INTO recordings VALUES (?,?)').run(recordingSha256, json(raw));
-    setMeta(db, { kind: 'rspack-bundle-coverage', coverageSchema: 1, coverageSha256: recordingSha256, scenario: args.scenario || envelope?.scenario || 'unspecified', precision,
-      coverageTotals: totals, coverageImportSummary: { matchedAssets: matched.size, ignoredEntries: ignored, warnings, recordingGaps: envelope?.gaps || [] } });
-    verifyInputs(inputs); db.exec('COMMIT'); db.close(); db = null; fs.linkSync(pending, output); fs.unlinkSync(pending);
-    return { ok: true, schemaVersion: 1, buildId: metadata.buildHash, coverageRunId: recordingSha256, database: output, precision,
-      counts: { assets: assets.length, matchedAssets: matched.size, sources: files.size, ignoredScripts: ignored.length, gaps: warnings.length + (envelope?.gaps?.length || 0) },
-      generated: totals, next: { command: 'index', coverage: output } };
-  } finally { input.close(); db?.close(); if (fs.existsSync(pending)) fs.unlinkSync(pending); }
+    const insertAsset = db.prepare('INSERT INTO coverage_assets VALUES (?,?)');
+    for (const asset of analyzed.assetReports) insertAsset.run(asset.id, json(asset));
+    db.prepare('INSERT INTO recordings VALUES (?,?)').run(analyzed.coverageMeta.coverageSha256, json(analyzed.raw));
+    setMeta(db, analyzed.coverageMeta);
+    verifyInputs(analyzed.inputs); db.exec('COMMIT'); db.close(); db = null; fs.linkSync(pending, output); fs.unlinkSync(pending);
+    return { ok: true, schemaVersion: 1, buildId: analyzed.metadata.buildHash, coverageRunId: analyzed.coverageMeta.coverageSha256, database: output, precision: analyzed.coverageMeta.precision,
+      counts: { assets: analyzed.assets.length, matchedAssets: analyzed.matched.size, sources: analyzed.fileRecords.length, ignoredScripts: analyzed.ignored.length, gaps: analyzed.warnings.length + (analyzed.envelope?.gaps?.length || 0) },
+      generated: analyzed.totals };
+  } finally { db?.close(); if (fs.existsSync(pending)) fs.unlinkSync(pending); }
 }
-module.exports = { analyze };
+
+module.exports = { analyze, computeAnalysis };

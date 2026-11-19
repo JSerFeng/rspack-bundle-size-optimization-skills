@@ -7,7 +7,7 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 
 按项目需要编写并接入数据收集插件，见 [data-capture](references/data-capture.md)。
 默认使用 Skill 自带的 `scripts/capture-plugin.cjs` 保存构建，`scripts/record.cjs` 连接 Chrome
-录制 coverage，再由 `scripts/query.cjs analyze/index` 完成 sourcemap 分析和按需查询。
+录制 coverage，再由 `scripts/query.cjs index` 一步完成 sourcemap 分析和建库，并通过 `status`/`chunks`/`modules`/`module`/`source`/`refs`/`chain` 按需查询（详见 [query-cli.md](references/query-cli.md)）。
 逐个执行所有在下面列出的优化检查项目，必须全部项目都执行，如果有失败则尝试修复后重试。
 
 ## 真实启动项目
@@ -20,7 +20,7 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 设法访问到 Rspack 配置，给 Rspack 配置中增加一个插件访问所有的 Chunk Group 中所有的 chunks，收集到他们包含的所有 modules。
 一个 Chunk Group 可能有多个 origins，每一个 origin 代表一个入口 module，如果是由 `name` 或 `webpackChunkName` 形成的 Chunk Group，他们的 origins 就可能有多个，分别分析各个 origin 的静态依赖 module，会分别形成不同的 module 图，页面真正需要的 module 取决于页面是从哪一个 origin 开始执行的。例如 entry 用 `import()` 依赖了 A、B，然后用 `webpackChunkName` 或者 `cacheGroup.name`，生成了一个包含 A、B 所有 modules 的 Chunk，假设从 A 开始执行的话，那 B 的 modules 就是非必要的，可以从 coverage 数据中看到所有被执行的 origin 对应的 module factory，然后就能发现哪些 chunk 的哪些 module 是某次启动实际需要的，哪些是不需要的，把这些收集起来报告给用户，可以让用户通过删掉 `__webpack_chunk_name__` 或 `cacheGroup.name` 来优化这部分。
 
-实现上可以通过查询 coverage 所有的 origin 即可计算出非必要的 module，因为只需要扫描真正执行到的 origin 对应所有的静态依赖，和 chunk group 中的所有 chunk 取一个非即可找到所有的不必要 module。如果是非必要 module 那就可以找出原因，是 `__webpack_chunk_name__` 还是 `cacheGroup.name` 等配置导致，报告给用户。
+实现上可以直接运行 `scripts/query.cjs chunks --db <index.sqlite>` 识别标有 `[MULTI]` 的多 origin Chunk Group，再用 `chunks --group <groupId>` 查看每个 origin 的执行状态以及仅从“未执行 origin”静态可达的候选非必要 module。确认是非必要 module 后，再排查原因（如 `__webpack_chunk_name__` 或 `cacheGroup.name` 配置），报告给用户。
 
 ## 分析 export usage
 

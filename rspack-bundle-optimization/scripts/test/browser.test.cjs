@@ -39,10 +39,9 @@ test('bundled recorder captures actual Chrome block coverage before first-screen
   const script = data.scripts.find(script => script.url === `${url}main.js`); assert.ok(script); assert.ok(script.text);
   assert.ok(script.functions.some(fn => fn.ranges.some(range => range.count === 0)), 'Retained cold() implementation should have zero execution count.');
   assert.ok(data.network.some(request => request.url.endsWith('/main.js') && request.status === 200));
-  const coverage = path.join(dir, 'coverage.sqlite'); const index = path.join(dir, 'index.sqlite');
-  const analysis = main(['analyze', '--build', build, '--coverage', out, '--out', coverage]);
+  const index = path.join(dir, 'index.sqlite');
+  const analysis = main(['index', '--build', build, '--coverage', out, '--out', index]);
   assert.equal(analysis.precision, 'per-block'); assert.ok(analysis.generated.unusedBytes > 0);
-  main(['index', '--coverage', coverage, '--out', index]);
   const modules = main(['modules', '--db', index, '--scope', 'loaded', '--sort', 'coverage.generated.unexecutedBytes:desc']);
   assert.ok(modules.items.some(module => module.coverage.generated?.unexecutedBytes > 0));
   // Re-recording the same ready page must wait for its new document, never accept the old ready marker.

@@ -3,12 +3,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { main } = require('../query.cjs');
+const { main, formatText } = require('../query.cjs');
 const { DatabaseSync } = require('node:sqlite');
 
 const { buildFixture, core } = require('./build-fixture.cjs');
 
-test('bundled plugin -> bundled sourcemap analysis -> indexed evidence with real production optimization', { skip: !core }, async t => {
+test('bundled plugin -> one-step index -> AI-friendly queries with real production optimization', { skip: !core }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rspack-bundle-real-'));
   if (!process.env.KEEP_QUERY_FIXTURE) t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const build = await buildFixture(dir);
@@ -20,30 +20,97 @@ test('bundled plugin -> bundled sourcemap analysis -> indexed evidence with real
   assert.equal(fs.readFileSync(path.join(dir, 'baseline/main.js'), 'utf8'), asset.content, 'The capture plugin must preserve the production JavaScript.');
   const recording = path.join(dir, 'coverage.json');
   fs.writeFileSync(recording, JSON.stringify([{ url: 'http://localhost/main.js', text: asset.content, ranges: [{ start: 0, end: Math.floor(asset.content.length / 2) }] }]));
-  const report = path.join(dir, 'coverage.sqlite'); const index = path.join(dir, 'index.sqlite');
-  const result = main(['analyze', '--build', build, '--coverage', recording, '--out', report, '--precision', 'per-block', '--scenario', 'first-screen']);
-  assert.ok(result.generated.mappedBytes > 0); assert.equal(result.counts.matchedAssets, 1);
-  // Analysis is a portable complete SQLite artifact: the original capture and recording can be removed.
-  fs.rmSync(path.join(dir, 'capture'), { recursive: true, force: true }); fs.unlinkSync(recording);
-  main(['index', '--coverage', report, '--out', index]);
-  const query = (command, options = {}) => main([command, '--db', index, ...Object.entries(options).flatMap(([key, value]) => [`--${key}`, String(value)])]);
+  const index = path.join(dir, 'index.sqlite');
+  const indexed = main(['index', '--build', build, '--coverage', recording, '--out', index, '--precision', 'per-block', '--scenario', 'first-screen']);
+  assert.ok(indexed.generated.mappedBytes > 0);
+  const toFlags = options => Object.entries(options).flatMap(([k, v]) => v === true ? [`--${k}`] : v === false || v === undefined ? [] : [`--${k}`, String(v)]);
+  const query = (command, options = {}) => main([command, '--db', index, ...toFlags(options)]);
+
   const status = query('status'); assert.ok(status.counts.modules >= 3); assert.ok(status.generated.mappedBytes > 0);
+  assert.ok(formatText('status', status).includes('# Status'));
+
+  const chunks = query('chunks');
+  assert.ok(chunks.chunks.total >= 1);
+  assert.ok(chunks.page.total >= 1);
+  assert.ok(formatText('chunks', chunks).includes('# Chunks & Chunk Groups'));
+
   const modules = query('modules', { scope: 'loaded', sort: 'coverage.generated.unexecutedBytes:desc' });
   assert.ok(modules.items.length >= 3);
-  const dep = modules.items.find(item => item.path.endsWith('/dep.js')); assert.ok(dep);
-  assert.ok(query('coverage', { module: dep.moduleId, view: 'lines' }).items.length);
-  const detail = query('module', { module: dep.moduleId, include: 'exports' });
+  const dep = modules.items.find(item => item.path.endsWith('dep.js')); assert.ok(dep);
+  const detail = query('module', { module: dep.moduleId });
   assert.ok(detail.exports.items.some(item => item.exportPath[0] === 'hot'));
-  const refs = query('references', { module: dep.moduleId, relation: 'native' }); assert.ok(refs.items.length);
-  const reference = query('reference', { edge: refs.items[0].edgeId, characters: 500 });
-  assert.ok(reference.mapping.window || reference.mapping.candidates.length);
-  const resource = detail.sources.items.find(item => item.coordinateSpace === 'resource');
-  assert.ok(query('source', { source: resource.sourceId, characters: 100 }).content.length);
-  const { command: sourceCommand, ...sourceOptions } = reference.mapping.sourceQuery;
-  const useSite = query(sourceCommand, sourceOptions);
-  assert.ok(useSite.coverage.total > 0, 'A resource sourceQuery should retain the verified coverage overlay.');
-  assert.ok(query('chain', { module: dep.moduleId, export: 'hot' }).edges.length);
-  t.diagnostic(JSON.stringify({ directory: dir, counts: status.counts, mappedBytes: status.generated.mappedBytes, outputBytes: Buffer.byteLength(JSON.stringify(modules)) }));
+  assert.ok(detail.chunks.length >= 1);
+  assert.equal(detail.sources.items.filter(s => s.coordinateSpace === 'resource').length, 1);
+
+  const src = query('source', { module: dep.moduleId });
+  assert.ok(src.content.includes('export function hot'));
+  assert.ok(src.coverage.total > 0);
+  assert.ok(formatText('source', src).includes('|'));
+
+  const refs = query('refs', { module: dep.moduleId, relation: 'native' });
+  assert.ok(refs.items.length);
+  assert.ok(refs.items[0].originPath.endsWith('index.js'));
+  assert.ok(refs.items[0].mapping.snippet.lines.length > 0);
+  assert.ok(formatText('refs', refs).includes('## Export'));
+
+  const expanded = query('refs', { edge: refs.items[0].edgeId, characters: 500 });
+  assert.ok(expanded.items[0].mapping.window || expanded.items[0].mapping.candidates?.length);
+  const chain = query('chain', { module: dep.moduleId, export: 'hot' });
+  assert.ok(chain.edges.length);
+  assert.ok(chain.modules.length >= 2);
+  assert.ok(formatText('chain', chain).includes('# Export Usage Chain'));
+  t.diagnostic(JSON.stringify({ directory: dir, counts: status.counts, mappedBytes: status.generated.mappedBytes, textBytes: Buffer.byteLength(formatText('modules', modules)) }));
+});
+
+test('chunks --group detects multi-origin merged chunk unnecessary module candidates', { skip: !core }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rspack-bundle-chunks-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const build = await buildFixture(dir, {
+    output: { path: path.join(dir, 'dist'), filename: '[name].js' },
+    optimization: { concatenateModules: false },
+  }, true, {
+    'index.js': "globalThis.loadA = () => import(/* webpackChunkName: 'merged' */ './featA.js');\nglobalThis.loadB = () => import(/* webpackChunkName: 'merged' */ './featB.js');\n",
+    'featA.js': "import { helperA } from './helperA.js';\nexport function runA() { return 'featA-executed-marker:' + helperA(); }\n",
+    'helperA.js': "export function helperA() { return 'from-A-executed-branch'; }\n",
+    'featB.js': "import { helperB } from './helperB.js';\nexport function runB() { return 'featB-unexecuted-marker:' + helperB(); }\n",
+    'helperB.js': "export function helperB() { return 'from-B-unexecuted-branch-payload-padding-1234567890'; }\n",
+  });
+  const capture = new DatabaseSync(build, { readOnly: true });
+  const assets = capture.prepare('SELECT name,content FROM assets').all();
+  capture.close();
+  const mainAsset = assets.find(a => a.name === 'main.js');
+  const mergedAsset = assets.find(a => a.name === 'merged.js');
+  assert.ok(mainAsset && mergedAsset);
+  // Simulate execution covering main.js + only featA/helperA inside merged.js (not featB/helperB).
+  const aMarkers = [mergedAsset.content.indexOf('featA-executed-marker'), mergedAsset.content.indexOf('from-A-executed-branch')].filter(i => i >= 0);
+  const bMarkers = [mergedAsset.content.indexOf('featB-unexecuted-marker'), mergedAsset.content.indexOf('from-B-unexecuted-branch')].filter(i => i >= 0);
+  assert.equal(aMarkers.length, 2); assert.equal(bMarkers.length, 2);
+  const rangesA = aMarkers.map(pos => ({ start: pos, end: pos + 20 }));
+  const recording = path.join(dir, 'recording.json');
+  fs.writeFileSync(recording, JSON.stringify([
+    { url: 'http://localhost/main.js', text: mainAsset.content, ranges: [{ start: 0, end: mainAsset.content.length }] },
+    { url: 'http://localhost/merged.js', text: mergedAsset.content, ranges: rangesA },
+  ]));
+  const index = path.join(dir, 'index.sqlite');
+  main(['index', '--build', build, '--coverage', recording, '--out', index, '--precision', 'per-block']);
+  const overview = main(['chunks', '--db', index]);
+  const mainGroup = overview.items.find(g => g.name === 'main');
+  const mergedGroup = overview.items.find(g => g.name === 'merged');
+  assert.ok(mainGroup && mergedGroup, 'Chunk groups should be indexed with their names.');
+  assert.equal(mergedGroup.multiOrigin, true);
+  assert.equal(mergedGroup.originCount, 2);
+  const detail = main(['chunks', '--db', index, '--group', mergedGroup.groupId]);
+  assert.equal(detail.group.multiOrigin, true);
+  assert.deepEqual(detail.group.parents, [mainGroup.groupId]);
+  assert.equal(detail.origins.length, 2);
+  assert.equal(detail.analysis.executedOriginCount, 1);
+  assert.equal(detail.analysis.unexecutedOriginCount, 1);
+  assert.equal(detail.analysis.unnecessaryCandidateCount, 2);
+  assert.deepEqual(detail.analysis.candidates.map(c => c.path).sort(), ['featB.js', 'helperB.js']);
+  const text = formatText('chunks', detail);
+  assert.ok(text.includes('[MULTI-ORIGIN]'));
+  assert.ok(text.includes('## Origin Reachability Analysis'));
+  assert.ok(text.includes('helperB.js'));
 });
 
 test('native graph IDs align with layer-specific captured module instances', { skip: !core }, async t => {

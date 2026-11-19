@@ -22,7 +22,7 @@ function createCapture(file, metadata) {
     CREATE TABLE assets(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT,content TEXT NOT NULL,content_hash TEXT NOT NULL,
       source_map TEXT,map_error TEXT,chunks TEXT,initial INTEGER);
     CREATE INDEX capture_asset_hash ON assets(content_hash);
-    CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,chunks TEXT,origins TEXT,parents TEXT);
+    CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,chunks TEXT,origins TEXT,parents TEXT,name TEXT);
     CREATE TABLE capture_gaps(id TEXT PRIMARY KEY,module_id TEXT,kind TEXT,detail TEXT);
   `);
   setMeta(db, { schema: 1, kind: 'rspack-bundle-capture', status: 'capturing', graphAvailable: false, ...metadata });

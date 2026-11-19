@@ -1,7 +1,9 @@
 const { DatabaseSync } = require('node:sqlite');
-const { fs, path, fail, id, hash, json, signature, verifyInputs, setMeta } = require('./common.cjs');
+const { fs, path, fail, id, hash, json, displayPath, signature, verifyInputs, setMeta } = require('./common.cjs');
+const { canonicalSource } = require('./coverage.cjs');
+const { computeAnalysis } = require('./analyze.cjs');
 const { openUsage } = require('./adapters/usage.cjs');
-const { openCoverage } = require('./adapters/coverage.cjs');
+const { openCoverage, openInlineCoverage } = require('./adapters/coverage.cjs');
 
 const METRICS = ['ge', 'gl', 'gx', 'gu', 'gr', 'se', 'sl', 'sx', 'su', 'sr'];
 function normalizedMetrics(value) {
@@ -26,19 +28,30 @@ function packageName(resource) {
   const tail = parts.at(-1).split('/');
   return tail[0].startsWith('@') ? tail.slice(0, 2).join('/') : tail[0];
 }
+function classifyUsedState(used) {
+  if (used === false) return 'none';
+  if (Array.isArray(used)) return used.length ? 'named' : 'none';
+  return 'unknown';
+}
 function createSchema(db) {
   db.exec(`
     PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE; PRAGMA cache_size=-16384; PRAGMA mmap_size=0;
     CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-    CREATE TABLE modules(id TEXT PRIMARY KEY,identifier TEXT NOT NULL,resource TEXT,layer TEXT,type TEXT,package TEXT,
-      provided TEXT,used TEXT,loaded INTEGER,initial INTEGER,incoming INTEGER,consumers INTEGER,used_count INTEGER,
+    CREATE TABLE modules(id TEXT PRIMARY KEY,identifier TEXT NOT NULL,resource TEXT,display_path TEXT NOT NULL,layer TEXT,type TEXT,package TEXT,
+      provided TEXT,used TEXT,used_state TEXT NOT NULL,loaded INTEGER,initial INTEGER,incoming INTEGER,consumers INTEGER,used_count INTEGER,
       module_incoming INTEGER DEFAULT 0,module_outgoing INTEGER DEFAULT 0);
     CREATE TABLE aliases(adapter TEXT,original_id TEXT,module_id TEXT,PRIMARY KEY(adapter,original_id));
     CREATE TABLE sources(id TEXT PRIMARY KEY,path TEXT,space TEXT,hash TEXT,locator TEXT NOT NULL);
+    CREATE TABLE source_contents(source_id TEXT PRIMARY KEY,content TEXT);
     CREATE TABLE module_sources(module_id TEXT,source_id TEXT,PRIMARY KEY(module_id,source_id));
+    CREATE TABLE chunks(id TEXT PRIMARY KEY,initial INTEGER,loaded INTEGER,files TEXT,runtime TEXT,
+      emitted_bytes REAL,loaded_bytes REAL,executed_bytes REAL,unexecuted_bytes REAL);
+    CREATE TABLE module_chunks(module_id TEXT,chunk_id TEXT,PRIMARY KEY(module_id,chunk_id));
+    CREATE INDEX module_chunks_chunk ON module_chunks(chunk_id,module_id);
+    CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,name TEXT,chunks TEXT,origins TEXT,parents TEXT);
     CREATE TABLE metrics(module_id TEXT,scope TEXT,ge REAL,gl REAL,gx REAL,gu REAL,gr REAL,se REAL,sl REAL,sx REAL,su REAL,sr REAL,PRIMARY KEY(module_id,scope));
     CREATE TABLE edges(id TEXT PRIMARY KEY,origin TEXT NOT NULL,target TEXT NOT NULL,origin_export TEXT,target_export TEXT,
-      kind TEXT,dependency TEXT,dependency_type TEXT,raw_loc TEXT,source_path TEXT,source_loc TEXT,adapter TEXT,original_id TEXT,active INTEGER);
+      kind TEXT,dependency TEXT,dependency_type TEXT,request TEXT,raw_loc TEXT,source_path TEXT,source_loc TEXT,adapter TEXT,original_id TEXT,active INTEGER);
     CREATE INDEX edge_in ON edges(target,kind,id); CREATE INDEX edge_out ON edges(origin,kind,id);
     CREATE TABLE targets(module_id TEXT,path TEXT,edge_id TEXT,PRIMARY KEY(module_id,path,edge_id));
     CREATE TABLE exports(id TEXT PRIMARY KEY,module_id TEXT,path TEXT,used TEXT,incoming INTEGER);
@@ -47,17 +60,21 @@ function createSchema(db) {
       ge REAL,gl REAL,gx REAL,gu REAL,ranges TEXT,range_precision TEXT);
     CREATE INDEX lines_module ON coverage_lines(module_id,id);
     CREATE INDEX lines_bytes ON coverage_lines(module_id,gu DESC,id);
+    CREATE INDEX lines_source_line ON coverage_lines(module_id,source_id,line);
     CREATE TABLE gaps(id TEXT PRIMARY KEY,module_id TEXT,kind TEXT,detail TEXT);
     CREATE INDEX metrics_unexecuted ON metrics(scope,gu DESC,module_id);
     CREATE INDEX metrics_emitted ON metrics(scope,ge DESC,module_id);
+    CREATE INDEX metrics_ratio ON metrics(scope,gr ASC,module_id);
     CREATE INDEX metrics_source ON metrics(scope,su DESC,module_id);
     CREATE INDEX modules_incoming ON modules(incoming DESC,id);
     CREATE INDEX modules_consumers ON modules(consumers DESC,id);
+    CREATE INDEX modules_used_state ON modules(used_state,id);
   `);
 }
 
 function buildIndex(args) {
-  if (!args.coverage && !args.usage) fail('INVALID_ARGUMENT', 'index requires --coverage or --usage.');
+  if (!args.build && !args.coverage && !args.usage) fail('INVALID_ARGUMENT', 'index requires --build, --coverage, or --usage.');
+  if (args.build && args.usage) fail('INVALID_ARGUMENT', 'Use --build or --usage, not both.');
   if (!args.out) fail('INVALID_ARGUMENT', '--out is required.');
   const output = path.resolve(args.out);
   if (fs.existsSync(output)) fail('OUTPUT_EXISTS', 'The index already exists. Choose a new --out path.');
@@ -65,8 +82,15 @@ function buildIndex(args) {
   const pending = `${output}.${process.pid}.${Date.now()}.incomplete`;
   let usage; let coverage; let db;
   try {
-    usage = args.usage ? openUsage(path.resolve(args.usage)) : null;
-    coverage = args.coverage ? openCoverage(path.resolve(args.coverage)) : null;
+    if (args.build && args.coverage) {
+      const analyzed = computeAnalysis({ build: args.build, coverage: args.coverage, scenario: args.scenario, precision: args.precision });
+      coverage = openInlineCoverage(analyzed);
+    } else if (args.build) {
+      usage = openUsage(path.resolve(args.build));
+    } else {
+      usage = args.usage ? openUsage(path.resolve(args.usage)) : null;
+      coverage = args.coverage ? openCoverage(path.resolve(args.coverage)) : null;
+    }
     const build = usage?.build || coverage.build;
     if (usage && coverage && (usage.build.hash !== coverage.build.hash || path.resolve(usage.build.context) !== path.resolve(coverage.build.context) ||
       (usage.build.compiler && coverage.build.compiler && usage.build.compiler !== coverage.build.compiler)))
@@ -84,8 +108,10 @@ function buildIndex(args) {
       if (known?.adapterIds[adapter] && known.adapterIds[adapter] !== row.id) fail('INPUT_IDENTITY_MISMATCH', 'Multiple module instances share identifier/layer; cannot merge them safely.');
       const provided = row.providedExports;
       const used = row.usedExports;
-      const value = known || { id: key, identifier: row.identifier, resource: row.resource ?? null, layer: row.layer ?? null,
-        type: row.moduleType ?? row.type ?? null, package: packageName(row.resource || row.identifier), provided: null, used: null, adapterIds: {} };
+      const value = known || { id: key, identifier: row.identifier, resource: row.resource ?? null,
+        displayPath: displayPath(row.resource || row.identifier, build.context),
+        layer: row.layer ?? null, type: row.moduleType ?? row.type ?? null,
+        package: packageName(row.resource || row.identifier), provided: null, used: null, adapterIds: {} };
       if (provided !== undefined && provided !== null && (!Array.isArray(provided) || !provided.every(name => typeof name === 'string'))) fail('INVALID_INPUT', 'Invalid provided exports.');
       if (used !== undefined && used !== null && typeof used !== 'boolean' && (!Array.isArray(used) || !used.every(name => typeof name === 'string'))) fail('INVALID_INPUT', 'Invalid used exports.');
       if (adapter === 'usage' || !known) { value.provided = provided ?? null; value.used = used ?? null; }
@@ -95,10 +121,18 @@ function buildIndex(args) {
       return key;
     };
     const sourceInsert = db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?,?,?,?)');
+    const contentInsert = db.prepare('INSERT OR IGNORE INTO source_contents VALUES (?,?)');
     const linkInsert = db.prepare('INSERT OR IGNORE INTO module_sources VALUES (?,?)');
-    const addSource = (moduleId, sourcePath, space, sourceHash, locator) => {
+    const moduleSourceKey = new Map();
+    const addSource = (moduleId, sourcePath, space, sourceHash, locator, inlineContent = null) => {
+      const canonical = canonicalSource(sourcePath, build.context);
+      const dedupeKey = sourceHash !== null ? `${moduleId}\0${space}\0${sourceHash}\0${canonical}` : null;
+      if (dedupeKey && moduleSourceKey.has(dedupeKey)) return moduleSourceKey.get(dedupeKey);
       const key = id('src', [locator, space, sourceHash]);
-      sourceInsert.run(key, sourcePath, space, sourceHash, json(locator)); linkInsert.run(moduleId, key);
+      sourceInsert.run(key, displayPath(sourcePath, build.context), space, sourceHash, json(locator));
+      if (inlineContent !== null) contentInsert.run(key, inlineContent);
+      linkInsert.run(moduleId, key);
+      if (dedupeKey) moduleSourceKey.set(dedupeKey, key);
       return key;
     };
     const gapInsert = db.prepare('INSERT OR IGNORE INTO gaps VALUES (?,?,?,?)');
@@ -112,18 +146,17 @@ function buildIndex(args) {
         { adapter: 'usage', file: usage.file, module: row.id, space: 'post-loader' });
       if (row.source_gap) gap(key, 'source', { message: row.source_gap });
     }
-    // Both inputs must have enough identity evidence to align module instances.
     if (usage && coverage && ![...moduleRows.values()].some(row => row.adapterIds.usage && row.adapterIds.coverage))
       fail('INPUT_IDENTITY_MISMATCH', 'No identical module identifier/layer pairs connect these inputs.');
     if (coverage) {
       for (const row of coverage.modules()) {
         const moduleId = moduleMaps.coverage.get(row.id);
         const captured = coverage.db.prepare('SELECT transformed,transformed_hash,resource_content,resource_hash FROM modules WHERE id=?').get(row.id);
-        if (typeof captured?.transformed === 'string') addSource(moduleId, row.identifier, 'post-loader', captured.transformed_hash || hash(captured.transformed), { adapter: 'usage', file: coverage.database, module: row.id, space: 'post-loader' });
         if (typeof captured?.resource_content === 'string') addSource(moduleId, row.resource || row.identifier, 'resource', captured.resource_hash || hash(captured.resource_content), { adapter: 'usage', file: coverage.database, module: row.id, space: 'resource' });
+        if (typeof captured?.transformed === 'string') addSource(moduleId, row.identifier, 'post-loader', captured.transformed_hash || hash(captured.transformed), { adapter: 'usage', file: coverage.database, module: row.id, space: 'post-loader' });
       }
     }
-    const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const targetInsert = db.prepare('INSERT OR IGNORE INTO targets VALUES (?,?,?)');
     let missingEdges = 0;
     const ingestEdges = (adapter, edges) => {
@@ -132,7 +165,7 @@ function buildIndex(args) {
         if (!origin || !target) { missingEdges++; continue; }
         const key = id('edge', [adapter, edge.originalId, edge.kind]);
         edgeInsert.run(key, origin, target, json(edge.originExport), json(edge.targetExport), edge.kind,
-          edge.dependency, edge.dependencyType, json(edge.rawLocation), edge.sourcePath, json(edge.sourceLocation), adapter, edge.originalId,
+          edge.dependency, edge.dependencyType, edge.request ?? null, json(edge.rawLocation), edge.sourcePath, json(edge.sourceLocation), adapter, edge.originalId,
           edge.active === null || edge.active === undefined ? null : Number(edge.active));
         if (edge.kind === 'native') {
           const names = edge.targetExport;
@@ -148,17 +181,19 @@ function buildIndex(args) {
     const filesByModule = new Map();
     let mappedLineCount = 0;
     if (coverage) {
+      const insertLine = db.prepare('INSERT OR REPLACE INTO coverage_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)');
       for (const file of coverage.report.files) {
         const knownModules = file.moduleIds.map(original => moduleMaps.coverage.get(original)).filter(Boolean);
         if (knownModules.length !== file.moduleIds.length) gap(null, 'coverage-module-link', { source: file.id, message: 'Some module instances are absent from the manifest.' });
         const detail = coverage.detail(file.id);
-        const locator = { adapter: 'coverage-source', file: coverage.database, source: file.id };
+        const locator = coverage.inlineSources
+          ? { adapter: 'inline-source', source: file.id }
+          : { adapter: 'coverage-source', file: coverage.database, source: file.id };
         const textHash = typeof detail.content === 'string' ? hash(detail.content) : null;
         for (const moduleId of knownModules) {
-          const sourceId = addSource(moduleId, file.path, file.coordinateSpace || 'map-source', textHash, locator);
+          const sourceId = addSource(moduleId, file.path, file.coordinateSpace || 'map-source', textHash, locator, coverage.inlineSources ? detail.content : null);
           const list = filesByModule.get(moduleId) || []; list.push(file); filesByModule.set(moduleId, list);
           const originalId = moduleRows.get(moduleId).adapterIds.coverage;
-          const insertLine = db.prepare('INSERT OR REPLACE INTO coverage_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)');
           for (const line of detail.mappedLines || []) {
             const perInstance = line.moduleStates?.[originalId];
             const evidence = perInstance || (file.moduleIds.length === 1 ? line : null);
@@ -175,21 +210,51 @@ function buildIndex(args) {
       }
       for (const diagnostic of coverage.manifest.diagnostics || []) gap(null, 'build', diagnostic);
       for (const ignored of coverage.report.importSummary.ignoredEntries || []) gap(null, 'ignored-coverage', ignored);
-      for (const row of coverage.db.prepare('SELECT module_id,kind,detail FROM capture_gaps').iterate()) gap(moduleMaps.coverage.get(row.module_id) ?? null, row.kind, JSON.parse(row.detail));
+      if (coverage.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='capture_gaps'").get()) {
+        for (const row of coverage.db.prepare('SELECT module_id,kind,detail FROM capture_gaps').iterate()) gap(moduleMaps.coverage.get(row.module_id) ?? null, row.kind, JSON.parse(row.detail));
+      }
       for (const file of coverage.report.files) if (!file.moduleIds.length) gap(null, 'source-module-link', { path: file.path, message: 'Mapped source has no exact captured module instance.' });
     }
-    const moduleInsert = db.prepare('INSERT INTO modules(id,identifier,resource,layer,type,package,provided,used,loaded,initial,incoming,consumers,used_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    // Index chunks, module_chunks, and chunk_groups
+    const chunkSource = coverage ? coverage.report : usage;
+    const chunkAdapter = coverage ? 'coverage' : 'usage';
+    const chunkInsert = db.prepare('INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?,?)');
+    const modChunkInsert = db.prepare('INSERT OR IGNORE INTO module_chunks VALUES (?,?)');
+    const groupInsert = db.prepare('INSERT OR REPLACE INTO chunk_groups VALUES (?,?,?,?,?)');
+    const chunksList = chunkSource?.chunks || [];
+    for (const chunk of chunksList) {
+      const m = chunk.metrics;
+      chunkInsert.run(chunk.id, Number(chunk.initial), chunk.loaded === null ? null : Number(chunk.loaded),
+        json(chunk.files || []), json(chunk.runtime || []),
+        m?.emittedBytes ?? null, m?.loadedBytes ?? null, m?.executedBytes ?? null, m?.unusedBytes ?? null);
+    }
+    for (const group of chunkSource?.chunkGroups || []) {
+      const origins = (group.origins || []).map(origin => ({
+        moduleId: origin.moduleId ? (moduleMaps[chunkAdapter].get(origin.moduleId) ?? null) : null,
+        request: origin.request ?? null,
+        location: origin.location ?? null,
+      }));
+      groupInsert.run(group.id, group.name ?? null, json(group.chunks || []), json(origins), json(group.parents || []));
+    }
+    const moduleInsert = db.prepare('INSERT INTO modules(id,identifier,resource,display_path,layer,type,package,provided,used,used_state,loaded,initial,incoming,consumers,used_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const metricInsert = db.prepare(`INSERT INTO metrics VALUES (${Array(12).fill('?').join(',')})`);
     const covModules = new Map(coverage ? coverage.modules().map(row => [row.id, row]) : []);
-    const chunks = new Map((coverage?.report.chunks || []).map(chunk => [chunk.id, chunk]));
+    const usageChunksByMod = new Map();
+    if (!coverage && usage) {
+      for (const row of usage.modules()) usageChunksByMod.set(row.id, row.chunks || []);
+    }
+    const chunks = new Map(chunksList.map(chunk => [chunk.id, chunk]));
     for (const row of moduleRows.values()) {
       const captured = covModules.get(row.adapterIds.coverage);
-      const knownChunks = (captured?.chunks || []).map(key => chunks.get(key)).filter(Boolean);
-      const loaded = knownChunks.length ? knownChunks.some(chunk => chunk.loaded === true) ? 1 : knownChunks.some(chunk => chunk.loaded === null) ? null : 0 : null;
+      const chunkIds = coverage ? (captured?.chunks || []) : (usageChunksByMod.get(row.adapterIds.usage) || []);
+      for (const cid of chunkIds) modChunkInsert.run(row.id, cid);
+      const knownChunks = chunkIds.map(key => chunks.get(key)).filter(Boolean);
+      const loaded = coverage && knownChunks.length ? knownChunks.some(chunk => chunk.loaded === true) ? 1 : knownChunks.some(chunk => chunk.loaded === null) ? null : 0 : null;
       const initial = knownChunks.length ? Number(knownChunks.some(chunk => chunk.initial)) : null;
       const incoming = graphAvailable ? db.prepare("SELECT count(*) AS n,count(DISTINCT origin) AS consumers FROM edges WHERE target=? AND kind='native'").get(row.id) : null;
       const usedCount = Array.isArray(row.used) ? new Set(row.used).size : row.used === false ? 0 : null;
-      moduleInsert.run(row.id, row.identifier, row.resource, row.layer, row.type, row.package, json(row.provided), json(row.used), loaded, initial, incoming?.n ?? null, incoming?.consumers ?? null, usedCount);
+      const usedState = classifyUsedState(row.used);
+      moduleInsert.run(row.id, row.identifier, row.resource, row.displayPath, row.layer, row.type, row.package, json(row.provided), json(row.used), usedState, loaded, initial, incoming?.n ?? null, incoming?.consumers ?? null, usedCount);
       const files = filesByModule.get(row.id) || [];
       const generated = sumMetrics(files.map(file => normalizedMetrics(file.generatedMetricsById ? file.generatedMetricsById[row.adapterIds.coverage] ?? null : file.moduleIds.length === 1 ? file.metrics : null)));
       const retained = sumMetrics(files.map(file => normalizedMetrics(file.moduleMetricsById?.[row.adapterIds.coverage] ?? (file.moduleIds.length === 1 ? file.moduleMetrics : null))));
@@ -219,18 +284,27 @@ function buildIndex(args) {
     if (usage?.metadata.discardedEdges) gap(null, 'usage-capture', { discardedEdges: usage.metadata.discardedEdges });
     verifyInputs(inputs);
     const identity = { inputs, build, coverage: coverage?.dataset.coverageSha256 ?? null };
-    const metadata = { kind: 'rspack-bundle-query', schemaVersion: 2, status: 'complete', datasetId: id('dataset', identity),
+    const metadata = { kind: 'rspack-bundle-query', schemaVersion: 3, status: 'complete', datasetId: id('dataset', identity),
       buildId: build.hash, compiler: build.compiler, context: build.context, inputs, coverageRunId: coverage?.dataset.coverageSha256 ?? null,
       scenario: coverage?.dataset.scenario ?? null, coveragePrecision: coverage?.dataset.precision ?? null,
       graphAvailable, coverageAvailable: Boolean(coverage), coverageRanges: false, scopes: coverage ? ['build', 'loaded'] : ['build'],
       coverageTotals: coverage?.metadata.coverageTotals ?? null, coverageImportSummary: coverage?.metadata.coverageImportSummary ?? null,
-      graphColumnBase: usage?.metadata.columnBase ?? coverage?.metadata.columnBase ?? 1, graphLocationSpace: usage?.metadata.locationSpace ?? coverage?.metadata.locationSpace ?? 'auto', counts: { modules: moduleRows.size, coverageLines: mappedLineCount,
-        edges: db.prepare('SELECT count(*) AS n FROM edges').get().n, sources: db.prepare('SELECT count(*) AS n FROM sources').get().n,
-        gaps: db.prepare('SELECT count(*) AS n FROM gaps').get().n }, createdAt: new Date().toISOString() };
+      graphColumnBase: usage?.metadata.columnBase ?? coverage?.metadata.columnBase ?? 1,
+      graphLocationSpace: usage?.metadata.locationSpace ?? coverage?.metadata.locationSpace ?? 'auto',
+      counts: {
+        modules: moduleRows.size, coverageLines: mappedLineCount,
+        edges: db.prepare('SELECT count(*) AS n FROM edges').get().n,
+        sources: db.prepare('SELECT count(*) AS n FROM sources').get().n,
+        chunks: db.prepare('SELECT count(*) AS n FROM chunks').get().n,
+        chunkGroups: db.prepare('SELECT count(*) AS n FROM chunk_groups').get().n,
+        gaps: db.prepare('SELECT count(*) AS n FROM gaps').get().n,
+      },
+      createdAt: new Date().toISOString() };
     setMeta(db, metadata); db.exec('COMMIT'); db.close(); db = null;
     fs.linkSync(pending, output); fs.unlinkSync(pending);
-    return { ok: true, schemaVersion: 1, datasetId: metadata.datasetId, buildId: metadata.buildId, compiler: metadata.compiler,
-      coverageRunId: metadata.coverageRunId, database: output, counts: metadata.counts };
+    return { ok: true, schemaVersion: 1, command: 'index', datasetId: metadata.datasetId, buildId: metadata.buildId, compiler: metadata.compiler,
+      coverageRunId: metadata.coverageRunId, precision: metadata.coveragePrecision, scenario: metadata.scenario,
+      database: output, counts: metadata.counts, generated: metadata.coverageTotals ?? null };
   } finally {
     db?.close(); usage?.close(); coverage?.close();
     if (fs.existsSync(pending)) fs.unlinkSync(pending);

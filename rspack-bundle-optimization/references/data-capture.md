@@ -5,7 +5,7 @@
 
 ```sh
 npm ci --prefix <skill>/scripts --omit=dev
-node <skill>/scripts/query.cjs describe
+node <skill>/scripts/query.cjs --help
 ```
 
 ## 保存同一次构建的证据
@@ -66,39 +66,33 @@ precise coverage 会影响 V8 的优化执行，正常性能耗时另录一轮 t
 ## 内置分析和查询
 
 ```sh
-node <skill>/scripts/query.cjs analyze --build <build.sqlite> \
-  --coverage /absolute/path/to/recording.json --out /absolute/path/to/coverage.sqlite
-node <skill>/scripts/query.cjs index --coverage /absolute/path/to/coverage.sqlite \
-  --out /absolute/path/to/index.sqlite
+# 一步完成 sourcemap/coverage 分析与建索引（默认输出 AI 友好文本，加 --format json 输出 JSON）
+node <skill>/scripts/query.cjs index --build <build.sqlite> \
+  --coverage /absolute/path/to/recording.json --out /absolute/path/to/index.sqlite
 node <skill>/scripts/query.cjs status --db /absolute/path/to/index.sqlite
+node <skill>/scripts/query.cjs chunks --db /absolute/path/to/index.sqlite
 node <skill>/scripts/query.cjs modules --db /absolute/path/to/index.sqlite --scope loaded \
-  --sort coverage.generated.unexecutedBytes:desc --limit 20
+  --max-ratio 0.2 --sort coverage.generated.unexecutedBytes:desc --limit 20
 ```
 
-analyze 直接处理内置录制或 Chrome Coverage JSON，核对 URL 与脚本文本 SHA-256，读取同一
-构建的 sourcemap，将生成区间映射到 source/行，并计算加载、执行和未执行字节。
+`index --build --coverage` 直接处理内置录制或 Chrome Coverage JSON，核对 URL 与脚本文本 SHA-256，读取同一构建的 sourcemap，将生成区间映射到 source/行，并计算加载、执行和未执行字节。
 同名 URL 的文本不匹配构建时拒绝分析。第三方脚本单独记录，不强行归入项目模块。
 原始 V8 的零执行子区间覆盖外层正计数；重复采样的执行范围取并集，不重复累计。
 
-coverage.sqlite 自带捕获的产物、图、源码、map 和录制，后续不依赖原构建快照目录。
-stdout 返回身份、计数、字节摘要及下一步查询入口，大数据留在 SQLite。
-对于旧的平面 Coverage JSON，--precision per-block/per-function 必须与实际采集方式一致，
-不清楚则保持 unknown；该参数不会把函数级录制变成区块级精度。
+构建快照与录制文件作为不可变输入保留；查询时自动校验输入签名，stdout 默认输出紧凑可读文本（`--format text`），大数据留在 SQLite。
+对于旧的平面 Coverage JSON，`--precision per-block/per-function` 必须与实际采集方式一致，不清楚则保持 `unknown`；该参数不会把函数级录制变成区块级精度。
 
-源码归因以完整路径、文本身份和 chunk 归属关联模块；共享 source 无法唯一归因时返回
-null，不按比例摊分。asset map 若只指向 loader 中间产物，会保留 map-source 坐标空间；
-不把文件名像 TS/TSX 当作已验证的原始源码映射。
+源码归因以完整路径、文本身份和 chunk 归属关联模块；共享 source 无法唯一归因时返回 unknown，不按比例摊分。asset map 若只指向 loader 中间产物，会保留 `map-source` 坐标空间；不把文件名像 TS/TSX 当作已验证的原始源码映射。
 
-只调查编译期导出时，无需录制和 analyze：
+只调查编译期导出或 chunk 结构时，无需录制：
 
 ```sh
-node <skill>/scripts/query.cjs index --usage <build.sqlite> --out <index.sqlite>
+node <skill>/scripts/query.cjs index --build <build.sqlite> --out <index.sqlite>
 ```
 
 ## 按需分析
 
-具体选项见 [query-cli.md](query-cli.md)。先确认 status 的构建身份、场景、scope、统计口径和
-数据缺口，再按模块、coverage 行、导出、直接引用、chain 和源码逐层查询。
+具体选项见 [query-cli.md](query-cli.md)。先用 `status` 确认构建身份、场景、总字节与缺口，用 `chunks` 检查多 origin 合并的 chunk group，再用 `modules`、`module`、`source`、`refs`、`chain` 逐层阅读真实源码与引用链。
 
 原生图反映编译期关系，源码语法 owner 只表明归属，不是运行时调用证明。未执行不等于可删。
 生成 JS UTF-8 字节与保留映射源码行字节分别报告；检查 coordinateSpace、hash 和映射缺口。
