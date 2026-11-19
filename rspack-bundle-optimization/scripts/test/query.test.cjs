@@ -369,3 +369,78 @@ test('review edge cases: --fields text columns, outgoing refs target path, curso
   fs.writeFileSync(badJson, 'SQLite format 3\0not-json');
   errorCode(() => main(['index', '--build', path.join(f.dir, 'usage.sqlite'), '--coverage', badJson, '--out', path.join(f.dir, 'bad.sqlite')]), 'INVALID_INPUT');
 });
+
+test('production scale fixes: displayPath strips loader chains and shortens monorepo siblings, line-only identity map keeps exact columns, compile-time tables hide unknown coverage columns', t => {
+  const { displayPath } = require('../lib/common.cjs');
+  const ctx = '/Users/dev/monorepo/packages/L4-Entry/app-chat';
+  assert.equal(displayPath('loader1??ruleSet[1]!builtin:swc-loader!../../L3-Feature/foo.tsx', ctx), '../../L3-Feature/foo.tsx');
+  assert.equal(displayPath('/Users/dev/monorepo/packages/L1-Arch/i18n/translation.ts', ctx), '../../L1-Arch/i18n/translation.ts');
+  assert.equal(displayPath('/Users/dev/monorepo/node_modules/.pnpm/react/index.js', ctx), '../../../node_modules/.pnpm/react/index.js');
+  assert.equal(displayPath('/etc/hosts', ctx), '/etc/hosts');
+
+  // Line-only identity loader map pointing to post-loader text preserves exact post-loader columns AND explicit gap
+  const f = fixture(t);
+  const resource = 'import type { T } from "./t";\nexport const fn = () => useTranslateFn();\n';
+  const transformed = 'export const fn = () => useTranslateFn();\n';
+  const lineOnlyIdentityMap = { version: 3, sources: ['loaderA!loaderB!src/a.tsx'], sourcesContent: [transformed], names: [], mappings: 'AAAA' };
+  const modules = [
+    module_('a', { identifier: 'loaderA!loaderB!/fixture/src/a.tsx', resource: '/fixture/src/a.tsx', resourceText: resource, transformed, map: lineOnlyIdentityMap }),
+    module_('b', { identifier: '/fixture/src/b.ts', resource: '/fixture/src/b.ts' }),
+  ];
+  f.index({ usage: usage(path.join(f.dir, 'usage.sqlite'), modules, [
+    { origin: 'a', target: 'b', loc: '1:25-39', originExport: ['fn'], targetExport: ['useTranslateFn'] },
+  ], { locationSpace: 'post-loader' }) });
+  const b = f.query('modules', { search: 'src/b.ts' }).items[0].moduleId;
+  const refs = f.query('refs', { module: b });
+  assert.equal(refs.items[0].mapping.sourcePath, 'src/a.tsx');
+  assert.deepEqual(refs.items[0].mapping.sourceLocation, { start: { line: 1, column: 24 }, end: { line: 1, column: 38 } });
+  assert.ok(refs.items[0].mapping.gap.includes('post-loader text'));
+  const refText = formatText('refs', refs);
+  assert.equal(refText.includes('loaderA!'), false);
+  assert.ok(refText.includes('^^^^^^^^^^^^^^'));
+
+  // Compile-time-only modules & chain omit empty coverage columns
+  const modText = formatText('modules', f.query('modules'));
+  assert.equal(modText.includes('gen.unexec'), false);
+  const chainText = formatText('chain', f.query('chain', { module: b, export: 'useTranslateFn' }));
+  assert.equal(chainText.includes('| loaded | exec% | unexec |'), false);
+});
+
+test('chunks supports --multi-origin, --search, --loaded and --group --section/--offset without exceeding 32 KiB on large groups', t => {
+  const { DatabaseSync } = require('node:sqlite');
+  const f = fixture(t);
+  const modules = Array.from({ length: 85 }, (_, i) => module_(i));
+  const covFile = coverage(path.join(f.dir, 'coverage'), modules);
+  const db = new DatabaseSync(covFile);
+  db.exec('CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,chunks TEXT,origins TEXT,parents TEXT,name TEXT);');
+  const manyOrigins = Array.from({ length: 80 }, (_, i) => ({ moduleId: String(i), request: `./feature-${i}-${'x'.repeat(40)}`, location: null }));
+  db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('0', '["main"]', JSON.stringify(manyOrigins), '[]', 'huge-shared');
+  db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('1', '["lazy"]', JSON.stringify([{ moduleId: '0', request: './lazy-only', location: null }]), '["0"]', 'single-lazy');
+  db.close();
+  f.index({ coverage: covFile });
+
+  const multi = f.query('chunks', { 'multi-origin': true });
+  assert.equal(multi.items.length, 1); assert.equal(multi.items[0].name, 'huge-shared');
+  assert.equal(multi.chunks.items.length, 0, 'Overview with chunk groups should not spam standalone chunk list.');
+  const loadedOnly = f.query('chunks', { loaded: true });
+  assert.equal(loadedOnly.items.length, 1); assert.equal(loadedOnly.items[0].name, 'huge-shared');
+  const searched = f.query('chunks', { search: 'single-lazy' });
+  assert.equal(searched.items.length, 1); assert.equal(searched.items[0].groupId, '1');
+
+  // Huge 80-origin group fits safely under 32 KiB and paginates origins via --section/--offset
+  const groupDetail = f.query('chunks', { group: 'huge-shared' });
+  assert.ok(Buffer.byteLength(JSON.stringify(groupDetail)) <= 32768);
+  assert.equal(groupDetail.group.originsTotal, 80);
+  assert.ok(groupDetail.origins.length < 80);
+  const groupText = formatText('chunks', groupDetail);
+  assert.ok(groupText.includes('--section origins --offset'));
+
+  const page1 = f.query('chunks', { group: 'huge-shared', section: 'origins', offset: 0, limit: 15 });
+  assert.equal(page1.section, 'origins');
+  assert.equal(page1.origins.length, 15);
+  assert.equal(page1.sectionPage.nextOffset, 15);
+  const page2 = f.query('chunks', { group: 'huge-shared', section: 'origins', offset: 15, limit: 15 });
+  assert.equal(page2.origins[0].request, './feature-15-' + 'x'.repeat(40));
+  errorCode(() => f.query('chunks', { section: 'origins' }), 'INVALID_ARGUMENT');
+  errorCode(() => f.query('chunks', { group: 'huge-shared', offset: 5 }), 'INVALID_ARGUMENT');
+});

@@ -135,3 +135,45 @@ test('native reference columns after Unicode are UTF-16 and align with captured 
   assert.ok(edges.some(edge => require('../lib/source.cjs').parseLocation(edge.loc, 1)?.start.column === code.lastIndexOf('hot()')));
   db.close();
 });
+
+test('capture-plugin indexes modules(identifier), captures post-emit rewrites and resolves nested output sourcemaps', { skip: !core }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rspack-bundle-emit-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { BundleEvidencePlugin } = require('../capture-plugin.cjs');
+  const { rspack } = require(core);
+  fs.writeFileSync(path.join(dir, 'index.js'), "import { hot } from './dep.js'; globalThis.v = hot();\n");
+  fs.writeFileSync(path.join(dir, 'dep.js'), "export function hot() { return 'nested-ok'; }\n");
+  let snapshot;
+  const rewritePlugin = {
+    apply(compiler) {
+      compiler.hooks.afterEmit.tap('MockArgusRewritePlugin', () => {
+        const outFile = path.join(dir, 'dist/static/js/main.js');
+        fs.appendFileSync(outFile, '\n/* post-emit-rewrite */\n');
+      });
+    },
+  };
+  const compiler = rspack({
+    context: fs.realpathSync(dir), mode: 'production', entry: './index.js', devtool: 'hidden-source-map',
+    output: { path: path.join(dir, 'dist'), filename: 'static/js/main.js' },
+    plugins: [rewritePlugin, new BundleEvidencePlugin({ directory: path.join(dir, 'capture'), onSnapshot: file => { snapshot = file; } })],
+  });
+  try {
+    const stats = await new Promise((resolve, reject) => compiler.run((err, v) => err ? reject(err) : resolve(v)));
+    assert.equal(stats.hasErrors(), false, stats.toString({ errors: true }));
+  } finally { await new Promise(resolve => compiler.close(resolve)); }
+  const db = new DatabaseSync(snapshot, { readOnly: true });
+  const plan = db.prepare('EXPLAIN QUERY PLAN SELECT id FROM modules WHERE identifier=?').all('x');
+  assert.ok(plan.some(row => /INDEX capture_module_identifier/.test(row.detail)), JSON.stringify(plan));
+  const asset = db.prepare('SELECT content,source_map FROM assets WHERE name=?').get('static/js/main.js');
+  db.close();
+  assert.ok(asset.content.includes('/* post-emit-rewrite */'), 'Should capture post-emit rewritten asset bytes.');
+  assert.ok(JSON.parse(asset.source_map).x_rspack_bundle_map_base_url.endsWith('static/js/main.js.map'));
+
+  const recording = path.join(dir, 'rec.json');
+  fs.writeFileSync(recording, JSON.stringify([{ url: 'http://localhost/static/js/main.js', text: asset.content, ranges: [{ start: 0, end: asset.content.length }] }]));
+  const index = path.join(dir, 'index.sqlite');
+  const indexed = main(['index', '--build', snapshot, '--coverage', recording, '--out', index, '--precision', 'per-block']);
+  assert.ok(indexed.generated.mappedBytes > 0);
+  const dep = main(['modules', '--db', index, '--search', 'dep.js']).items[0];
+  assert.ok(dep.coverage.generated.executedBytes > 0);
+});

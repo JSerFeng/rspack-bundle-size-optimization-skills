@@ -14,6 +14,7 @@ function createCapture(file, metadata) {
     CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     CREATE TABLE modules(id TEXT PRIMARY KEY,identifier TEXT NOT NULL,layer TEXT,type TEXT,resource TEXT,parent_id TEXT,
       provided TEXT,used TEXT,transformed TEXT,source_map TEXT,resource_content TEXT,transformed_hash TEXT,resource_hash TEXT,source_gap TEXT);
+    CREATE INDEX capture_module_identifier ON modules(identifier);
     CREATE TABLE edges(id TEXT PRIMARY KEY,origin TEXT,target TEXT,origin_export TEXT,target_export TEXT,dependency TEXT,loc TEXT);
     CREATE INDEX capture_edge_in ON edges(target,id);
     CREATE TABLE refs(id TEXT PRIMARY KEY,origin TEXT,target TEXT,dependency_type TEXT,request TEXT,loc TEXT,active INTEGER);
@@ -22,6 +23,7 @@ function createCapture(file, metadata) {
     CREATE TABLE assets(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT,content TEXT NOT NULL,content_hash TEXT NOT NULL,
       source_map TEXT,map_error TEXT,chunks TEXT,initial INTEGER);
     CREATE INDEX capture_asset_hash ON assets(content_hash);
+    CREATE INDEX capture_asset_name ON assets(name);
     CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,chunks TEXT,origins TEXT,parents TEXT,name TEXT);
     CREATE TABLE capture_gaps(id TEXT PRIMARY KEY,module_id TEXT,kind TEXT,detail TEXT);
   `);

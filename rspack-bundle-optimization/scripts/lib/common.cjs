@@ -29,6 +29,8 @@ function float(value, fallback, max = Number.POSITIVE_INFINITY, min = Number.NEG
 function displayPath(value, context) {
   if (typeof value !== 'string' || !value) return value ?? null;
   let text = value.replaceAll('\\', '/');
+  const bang = text.lastIndexOf('!');
+  if (bang >= 0 && bang + 1 < text.length) text = text.slice(bang + 1);
   if (text.startsWith('webpack://')) {
     text = text.replace(/^webpack:\/\/[^/]*\//, '');
     if (text.startsWith('./')) text = text.slice(2);
@@ -37,6 +39,14 @@ function displayPath(value, context) {
     const base = path.resolve(context).replaceAll('\\', '/').replace(/\/+$/, '');
     if (text === base) return '.';
     if (text.startsWith(`${base}/`)) return text.slice(base.length + 1);
+    const rel = path.posix.relative(base, text);
+    const up = rel.match(/^(?:\.\.\/)+/);
+    const upCount = up ? up[0].length / 3 : 0;
+    const baseParts = base.split('/').filter(Boolean);
+    const textParts = text.split('/').filter(Boolean);
+    let common = 0;
+    while (common < baseParts.length && common < textParts.length && baseParts[common] === textParts[common]) common++;
+    if (upCount > 0 && upCount <= 5 && common >= 2) return rel;
   }
   return text;
 }

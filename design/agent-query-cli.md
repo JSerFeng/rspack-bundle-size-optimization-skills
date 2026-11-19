@@ -252,3 +252,19 @@ Agent 得到同一模块的 coverage、导出和消费位置，再决定继续�
 共享 source 不重复归因；unknown 不变零；有环/宽图保留边与 frontier；缺图/缺 map 能继续
 读取已有事实；源码窗口可准确续读；输入不同构建时拒绝关联；查询不修改输入或启动服务。
 同时记录大快照下的索引耗时、单次查询耗时/内存及输出字节，验证按需读取确实减少代价。
+
+## 真实 5 万模块业务仓库实战问题与修复记录（0.3.1）
+
+在约 49,998 模块、1,021,678 边、2,277 chunk、2,096 chunk group、1.9 GB 构建快照的真实 monorepo 实跑中，暴露并一次性修复了以下 11 个问题：
+
+1. **构建采集 $O(N^2)$ 卡死**：`capture-store.cjs` 缺少 `modules(identifier)` 索引（及 `assets(name)` 索引），`capture-plugin.cjs` 的 `moduleGraph` 回调对 5 万模块重复全表扫描 900 MB `modules` 表 → 补建索引后构建采集从卡死恢复至正常速度。
+2. **`emit` 后改写产物漏采与空值崩溃**：`capture-plugin.cjs` 原在 `afterProcessAssets` 采集，会漏掉 Argus 等在 `emit` 阶段改写最终 JS 产物的插件；改为 `compiler.hooks.afterEmit`（高 `stage`）优先读取写出后的落盘产物与 `.map`，并对 `asset.source?.source()` / `asset.source?.map()` 做空值保护，避免 Rspack 2.3.2 部分 asset 为 `undefined` 时抛 `TypeError`。
+3. **`analyze.cjs` 百万 span 重复 SHA-256**：原循环对每个 sourcemap span 重复对整个源文件做 SHA-256 和模块匹配（84% CPU 耗在 `sha256_block_armv8`）→ 按 asset 缓存 `(span.source, content)`，每个源文件只计算一次 hash 与归属。
+4. **嵌套输出目录相对 sourcemap 路径解析**：产物输出到子目录（如 `static/js/main.js.map`）时，`AnyMap(rawMap)` 缺少 `.map` 文件 base URL → 采集时记录 `x_rspack_bundle_map_base_url`，分析时传入 `AnyMap`。
+5. **`index.cjs` 建库循环重复加载源码 BLOB**：循环内重复 `prepare` 并读取完整 `transformed`/`resource_content` 字符串 → 改为单条 prepared 语句只查 `IS NOT NULL` 与 hash（仅缺失 hash 时按需回读）。
+6. **`refs` / `module` 输出 700 字符 loader 链噪音**：`displayPath` 未剥离 webpack/rspack `!` 前缀 loader 链 → 剥离 `!` 前缀，`module` 文本模式对超长 `identifier` 适度折叠（JSON 保留完整值）。
+7. **Monorepo 兄弟包路径未裁剪**：子包 `context` 外、同 monorepo 根下的兄弟包和根 `node_modules` 每行重复 60+ 字符绝对路径前缀 → `displayPath` 识别公共祖先根并转为短相对路径（如 `../../L1-Arch/...`）。
+8. **Line-only identity loader map 丢失精确列号**：当 loader map 指向 post-loader 文本且将列号归零时，`^` 只能指在行首 → 保留原始 `normalizedLoc` 精确列区间，同时继续保留诚实的 `gap` 警告。
+9. **大型多 origin `chunks --group` 超 32 KiB 报 `RECORD_TOO_LARGE`**：47 origin / 1,237 模块的大组缺少整体预算与分段翻页 → 对默认 `--group` 输出分段预算（`chunks` 6 KiB / `origins` 8 KiB / `candidates` 8 KiB），并新增 `--section chunks|origins|candidates --offset <n> --limit <m>` 分段翻页。
+10. **`chunks` 概览刷屏且缺筛选**：2,096 个 group 下 `--limit 5` 仍硬打印 50 行 `## Chunks` → 有 group 时不再刷屏输出独立 chunks 列表，并新增 `--multi-origin`、`--loaded`、`--search <substring>` 筛选。
+11. **纯编译期索引冗余 `unknown` 列**：无 coverage 时 `modules` / `chain` / `chunks` 仍重复打印多列 `unknown` → 无 coverage 时自动省略 coverage 相关列。

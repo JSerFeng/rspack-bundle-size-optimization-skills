@@ -1,4 +1,4 @@
-const { fail, json, integer, float, paginate, exportPath } = require('./common.cjs');
+const { fail, json, integer, float, displayPath, paginate, exportPath } = require('./common.cjs');
 const sourceLib = require('./source.cjs');
 
 const MODULE_SORT = {
@@ -51,9 +51,9 @@ function usageSummary(row) {
   const used = usedSummary(row);
   return { incomingReferences: row.incoming, distinctConsumers: row.consumers, usedExportCount: row.used_count, usedState: row.used_state, usedDetail: used.state };
 }
-function compactModule(row) {
+function compactModule(row, context = null) {
   return {
-    moduleId: row.id, path: row.display_path, identifier: row.identifier,
+    moduleId: row.id, path: displayPath(row.display_path, context), identifier: row.identifier,
     layer: row.layer, package: row.package, type: row.type,
     loaded: row.loaded === null ? null : Boolean(row.loaded),
     initial: row.initial === null ? null : Boolean(row.initial),
@@ -82,7 +82,7 @@ function modulePathMap(ctx, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return new Map();
   const rows = ctx.db.prepare(`SELECT id, display_path FROM modules WHERE id IN (${unique.map(() => '?').join(',')})`).all(...unique);
-  return new Map(rows.map(row => [row.id, row.display_path]));
+  return new Map(rows.map(row => [row.id, displayPath(row.display_path, ctx.meta.context)]));
 }
 
 function queryStatus(ctx) {
@@ -153,6 +153,7 @@ function queryModules(ctx) {
   }
   return {
     scope: currentScope,
+    coverageAvailable: ctx.meta.coverageAvailable,
     ...(ctx.args.fields ? { fields: ctx.args.fields.split(',') } : {}),
     ...paginate(ctx, {
       from: 'FROM modules m JOIN metrics c ON c.module_id=m.id',
@@ -160,7 +161,7 @@ function queryModules(ctx) {
       select: 'm.*,c.ge,c.gl,c.gx,c.gu,c.gr,c.se,c.sl,c.sx,c.su,c.sr',
       sort: MODULE_SORT,
       map: row => projection({
-        ...compactModule(row),
+        ...compactModule(row, ctx.meta.context),
         coverage: { generated: metrics(row, 'g'), retainedSource: metrics(row, 's') },
         usage: usageSummary(row),
       }, ctx.args.fields),
@@ -189,7 +190,7 @@ function queryModule(ctx) {
     map: row => ({ exportId: row.id, exportPath: JSON.parse(row.path), compilerUsage: row.used, incomingReferences: row.incoming }),
   });
   return {
-    ...compactModule(module),
+    ...compactModule(module, ctx.meta.context),
     scope: currentScope,
     chunks,
     usage: usageSummary(module),
@@ -197,7 +198,7 @@ function queryModule(ctx) {
     providedExportCount: JSON.parse(module.provided)?.length ?? null,
     usedExports: usedSummary(module),
     moduleReferences: { incoming: module.module_incoming, outgoing: module.module_outgoing },
-    sources: { items: sources.map(row => ({ sourceId: row.id, path: row.path, coordinateSpace: row.space, sourceHash: row.hash })), total: sourceTotal },
+    sources: { items: sources.map(row => ({ sourceId: row.id, path: displayPath(row.path, ctx.meta.context), coordinateSpace: row.space, sourceHash: row.hash })), total: sourceTotal },
     exports: { providedExportsKnown: module.provided !== 'null', ...exportsPage },
     originalIds: ctx.db.prepare('SELECT adapter,original_id AS moduleId FROM aliases WHERE module_id=? ORDER BY adapter').all(module.id),
   };
@@ -325,13 +326,13 @@ function referenceWhere(ctx, moduleId, names = exportPath(ctx.args)) {
   return { where: where.join(' AND '), params, direction };
 }
 
-function edgeItem(row, paths = null) {
+function edgeItem(row, paths = null, context = null) {
   return {
     edgeId: row.id,
     originModuleId: row.origin,
-    originPath: paths?.get(row.origin) ?? row.origin_path ?? null,
+    originPath: displayPath(paths?.get(row.origin) ?? row.origin_path ?? null, context),
     targetModuleId: row.target,
-    targetPath: paths?.get(row.target) ?? row.target_path ?? null,
+    targetPath: displayPath(paths?.get(row.target) ?? row.target_path ?? null, context),
     originExport: JSON.parse(row.origin_export),
     targetExport: JSON.parse(row.target_export),
     relationEvidence: row.kind,
@@ -365,7 +366,7 @@ function queryRefs(ctx) {
           WHERE e.id=?
         `).get(edgeId);
         if (!row) fail('REFERENCE_NOT_FOUND', `Unknown edge ID: ${edgeId}`);
-        const item = { edge: edgeItem(row), mapping: sourceLib.reference(ctx, row, { compact: false, session }) };
+        const item = { edge: edgeItem(row, null, ctx.meta.context), mapping: sourceLib.reference(ctx, row, { compact: false, session }) };
         const sz = Buffer.byteLength(json(item));
         if (bytes + sz > 26 * 1024 && items.length) break;
         items.push(item); bytes += sz;
@@ -387,7 +388,7 @@ function queryRefs(ctx) {
       sort: { id: 'e.id' },
       budget: 22 * 1024,
       map: row => {
-        const item = edgeItem(row);
+        const item = edgeItem(row, null, ctx.meta.context);
         if (includeCode) {
           item.mapping = sourceLib.reference(ctx, row, { compact: true, includeCode: true, context: contextLines, session });
         } else {
@@ -399,7 +400,7 @@ function queryRefs(ctx) {
     return {
       mode: 'module',
       moduleId: module.id,
-      modulePath: module.display_path,
+      modulePath: displayPath(module.display_path, ctx.meta.context),
       direction: filter.direction,
       contextLines: includeCode ? contextLines : null,
       graphAvailable: ctx.meta.graphAvailable,
@@ -436,7 +437,7 @@ function queryChain(ctx) {
         from: 'FROM edges e LEFT JOIN modules mo ON mo.id=e.origin LEFT JOIN modules mt ON mt.id=e.target',
         select: 'e.*, mo.display_path AS origin_path, mt.display_path AS target_path',
         where: filter.where, params: filter.params, sort: { id: 'e.id' },
-        map: row => { rawEdgeRows.set(row.id, row); return edgeItem(row); },
+        map: row => { rawEdgeRows.set(row.id, row); return edgeItem(row, null, ctx.meta.context); },
       });
       for (const edge of page.items) {
         if (!ids.has(edge.edgeId)) { ids.add(edge.edgeId); edges.push(edge); }
@@ -466,13 +467,14 @@ function queryChain(ctx) {
           WHERE m.id IN (${uniqueModIds.map(() => '?').join(',')})
           ORDER BY m.id
         `).all(...uniqueModIds).map(r => ({
-          moduleId: r.id, path: r.display_path,
+          moduleId: r.id, path: displayPath(r.display_path, ctx.meta.context),
           loaded: r.loaded === null ? null : Boolean(r.loaded),
           unexecutedBytes: r.gu ?? null, executionRatio: r.gr ?? null,
         }))
       : [];
     return {
-      root: { moduleId: root.id, path: root.display_path, exportPath: names },
+      root: { moduleId: root.id, path: displayPath(root.display_path, ctx.meta.context), exportPath: names },
+      coverageAvailable: ctx.meta.coverageAvailable,
       edges,
       terminals: terminals.map(t => ({ ...t, path: paths.get(t.moduleId) ?? null })),
       cycles: cycles.map(c => ({ ...c, path: paths.get(c.moduleId) ?? null })),
@@ -514,9 +516,27 @@ function queryChain(ctx) {
   return result;
 }
 
+function budgetItems(rows, maxBytes, maxCount = rows.length) {
+  const out = []; let bytes = 0;
+  for (const item of rows) {
+    if (out.length >= maxCount) break;
+    const sz = Buffer.byteLength(json(item)) + 1;
+    if (bytes + sz > maxBytes && out.length) break;
+    out.push(item); bytes += sz;
+  }
+  return out;
+}
+
 function queryChunks(ctx) {
   checkRun(ctx);
   if (ctx.args.group && ctx.args.chunk) fail('INVALID_ARGUMENT', 'Use --group or --chunk, not both.');
+  const section = ctx.args.section;
+  if ((section && !ctx.args.group) || (ctx.args.offset !== undefined && !section))
+    fail('INVALID_ARGUMENT', '--section requires --group, and --offset requires --section.');
+  if (section && !['chunks', 'origins', 'candidates'].includes(section))
+    fail('INVALID_ARGUMENT', '--section must be chunks, origins, or candidates.');
+  if ((ctx.args.group || ctx.args.chunk) && (ctx.args['multi-origin'] || ctx.args.loaded || ctx.args.search !== undefined))
+    fail('INVALID_ARGUMENT', '--multi-origin, --loaded, and --search apply to the chunks overview (without --group/--chunk).');
 
   if (ctx.args.chunk) {
     const chunk = ctx.db.prepare('SELECT * FROM chunks WHERE id=?').get(ctx.args.chunk);
@@ -524,6 +544,7 @@ function queryChunks(ctx) {
     const defaultSort = ctx.meta.coverageAvailable ? 'coverage.generated.unexecutedBytes:desc' : 'id:asc';
     return {
       mode: 'chunk',
+      coverageAvailable: ctx.meta.coverageAvailable,
       chunk: {
         chunkId: chunk.id, initial: Boolean(chunk.initial),
         loaded: chunk.loaded === null ? null : Boolean(chunk.loaded),
@@ -541,7 +562,7 @@ function queryChunks(ctx) {
         select: 'm.*,c.ge,c.gl,c.gx,c.gu,c.gr,c.se,c.sl,c.sx,c.su,c.sr',
         defaultSort,
         sort: MODULE_SORT,
-        map: row => ({ ...compactModule(row), coverage: { generated: metrics(row, 'g') }, usage: usageSummary(row) }),
+        map: row => ({ ...compactModule(row, ctx.meta.context), coverage: { generated: metrics(row, 'g') }, usage: usageSummary(row) }),
       }),
     };
   }
@@ -581,7 +602,6 @@ function queryChunks(ctx) {
     const groupModMap = new Map(groupModRows.map(r => [r.id, r]));
     const groupModSet = new Set(groupModMap.keys());
 
-    // Build static outgoing adjacency inside the chunk group (exclude dynamic import() edges).
     const adj = new Map();
     if (groupModSet.size) {
       const placeholders = [...groupModSet].map(() => '?').join(',');
@@ -611,9 +631,6 @@ function queryChunks(ctx) {
 
     const origins = originsRaw.map(origin => {
       const modId = origin.moduleId;
-      // Resolve entry modules inside this chunk group for this origin:
-      // 1) If origin.moduleId itself is inside the chunk group (e.g. entry chunk), it's a seed.
-      // 2) Otherwise look up outgoing edges from origin.moduleId into this chunk group.
       const entryIds = new Set();
       if (modId && groupModSet.has(modId)) entryIds.add(modId);
       if (modId && groupModSet.size) {
@@ -637,7 +654,7 @@ function queryChunks(ctx) {
         path: originPaths.get(modId) ?? null,
         request: origin.request,
         entryModuleIds: [...entryIds],
-        entryPaths: [...entryIds].map(id => groupModMap.get(id)?.display_path ?? null),
+        entryPaths: [...entryIds].map(id => displayPath(groupModMap.get(id)?.display_path ?? null, ctx.meta.context)),
         executionStatus: status,
         reachableModuleCount: reachable.size,
         _reachable: reachable,
@@ -654,51 +671,76 @@ function queryChunks(ctx) {
         for (const id of o._reachable) if (!executedReachable.has(id)) unexecutedOnlyIds.add(id);
       }
     }
+    const toCandidate = m => ({
+      moduleId: m.id, path: displayPath(m.display_path, ctx.meta.context),
+      emittedBytes: m.ge ?? null, loadedBytes: m.gl ?? null, executedBytes: m.gx ?? null, unexecutedBytes: m.gu ?? null,
+    });
     const unnecessaryCandidates = [...unexecutedOnlyIds].map(id => groupModMap.get(id)).filter(Boolean)
       .sort((a, b) => (b.gu ?? -1) - (a.gu ?? -1) || a.id.localeCompare(b.id));
     const candidateBytes = unnecessaryCandidates.reduce((sum, m) => sum + (m.gu ?? 0), 0);
+    const allOrigins = origins.map(({ _reachable, ...rest }) => rest);
+    const allCandidates = unnecessaryCandidates.map(toCandidate);
 
-    const candidateItems = []; let candBytes = 0;
-    for (const m of unnecessaryCandidates) {
-      const item = {
-        moduleId: m.id, path: m.display_path,
-        emittedBytes: m.ge ?? null, loadedBytes: m.gl ?? null, executedBytes: m.gx ?? null, unexecutedBytes: m.gu ?? null,
+    const groupMeta = {
+      groupId: group.id, name: group.name, parents,
+      multiOrigin: origins.length > 1,
+      totalModules: groupModRows.length,
+      chunksTotal: chunks.length,
+      originsTotal: allOrigins.length,
+    };
+    const analysisBase = {
+      coverageAvailable: ctx.meta.coverageAvailable,
+      executedOriginCount: executedOrigins.length,
+      unexecutedOriginCount: unexecutedOrigins.length,
+      unnecessaryCandidateCount: allCandidates.length,
+      unnecessaryCandidateBytes: ctx.meta.coverageAvailable ? candidateBytes : null,
+    };
+
+    if (section) {
+      const rows = { chunks, origins: allOrigins, candidates: allCandidates }[section];
+      const offset = integer(ctx.args.offset, 0, Number.MAX_SAFE_INTEGER, 0, 'offset');
+      const limit = integer(ctx.args.limit, 20, 200, 1, 'limit');
+      const slice = rows.slice(offset, offset + limit);
+      const items = budgetItems(slice, 24 * 1024, limit);
+      const nextOffset = offset + items.length < rows.length ? offset + items.length : null;
+      return {
+        mode: 'group',
+        section,
+        sectionPage: { offset, total: rows.length, returned: items.length, nextOffset },
+        group: groupMeta,
+        chunks: section === 'chunks' ? items : [],
+        origins: section === 'origins' ? items : [],
+        analysis: { ...analysisBase, candidates: section === 'candidates' ? items : [] },
       };
-      const sz = Buffer.byteLength(json(item));
-      if ((candBytes + sz > 10 * 1024 || candidateItems.length >= 30) && candidateItems.length) break;
-      candidateItems.push(item); candBytes += sz;
     }
 
     return {
       mode: 'group',
-      group: {
-        groupId: group.id, name: group.name, parents,
-        multiOrigin: origins.length > 1,
-        totalModules: groupModRows.length,
-        chunksTotal: chunks.length,
-        originsTotal: origins.length,
-      },
-      chunks: chunks.slice(0, 40),
-      origins: origins.slice(0, 40).map(({ _reachable, ...rest }) => rest),
-      analysis: {
-        coverageAvailable: ctx.meta.coverageAvailable,
-        executedOriginCount: executedOrigins.length,
-        unexecutedOriginCount: unexecutedOrigins.length,
-        unnecessaryCandidateCount: unnecessaryCandidates.length,
-        unnecessaryCandidateBytes: ctx.meta.coverageAvailable ? candidateBytes : null,
-        candidates: candidateItems,
-      },
+      group: groupMeta,
+      chunks: budgetItems(chunks, 6 * 1024, 30),
+      origins: budgetItems(allOrigins, 8 * 1024, 30),
+      analysis: { ...analysisBase, candidates: budgetItems(allCandidates, 8 * 1024, 30) },
     };
   }
 
-  // Default: list chunk groups + chunks overview
+  // Default: list chunk groups (with optional --multi-origin, --loaded, --search filters)
+  const where = []; const params = [];
+  if (ctx.args['multi-origin']) where.push('json_array_length(cg.origins) > 1');
+  if (ctx.args.loaded) {
+    if (!ctx.meta.coverageAvailable) fail('METRIC_UNAVAILABLE', '--loaded requires a coverage input.');
+    where.push('EXISTS (SELECT 1 FROM json_each(cg.chunks) jc JOIN chunks ch ON ch.id=jc.value WHERE ch.loaded=1)');
+  }
+  if (ctx.args.search) {
+    where.push("(instr(COALESCE(cg.name,''),?)>0 OR instr(cg.id,?)>0 OR instr(cg.origins,?)>0)");
+    params.push(ctx.args.search, ctx.args.search, ctx.args.search);
+  }
   const groupsPage = paginate(ctx, {
     command: 'chunks',
-    defaultLimit: 30,
-    budget: 14 * 1024,
+    defaultLimit: 20,
+    budget: 20 * 1024,
     from: 'FROM chunk_groups cg',
     select: 'cg.*',
-    where: '1', params: [],
+    where: where.join(' AND ') || '1', params,
     sort: { id: 'cg.id', name: 'cg.name' },
     map: row => {
       const chunkIds = JSON.parse(row.chunks);
@@ -731,24 +773,40 @@ function queryChunks(ctx) {
       };
     },
   });
-  const chunkRows = []; let chunkBytes = 0;
-  for (const row of ctx.db.prepare('SELECT * FROM chunks ORDER BY id LIMIT 50').iterate()) {
-    const item = {
-      chunkId: row.id, initial: Boolean(row.initial),
-      loaded: row.loaded === null ? null : Boolean(row.loaded),
-      files: JSON.parse(row.files),
-      moduleCount: ctx.db.prepare('SELECT count(*) AS n FROM module_chunks WHERE chunk_id=?').get(row.id).n,
-      generated: row.emitted_bytes === null ? null : {
-        emittedBytes: row.emitted_bytes, loadedBytes: row.loaded_bytes,
-        executedBytes: row.executed_bytes, unexecutedBytes: row.unexecuted_bytes,
-      },
-    };
-    const sz = Buffer.byteLength(json(item));
-    if (chunkBytes + sz > 8 * 1024 && chunkRows.length) break;
-    chunkRows.push(item); chunkBytes += sz;
-  }
   const chunkTotal = ctx.db.prepare('SELECT count(*) AS n FROM chunks').get().n;
-  return { mode: 'overview', ...groupsPage, chunks: { items: chunkRows, total: chunkTotal } };
+  const totalGroupsAll = ctx.db.prepare('SELECT count(*) AS n FROM chunk_groups').get().n;
+  // Only include standalone chunk list when the dataset has no chunk_groups (avoid dumping 50 chunks on every overview).
+  const chunkRows = [];
+  if (totalGroupsAll === 0) {
+    const chunkLimit = integer(ctx.args.limit, 20, 200, 1, 'limit');
+    let chunkBytes = 0;
+    for (const row of ctx.db.prepare('SELECT * FROM chunks ORDER BY id LIMIT ?').iterate(chunkLimit)) {
+      const item = {
+        chunkId: row.id, initial: Boolean(row.initial),
+        loaded: row.loaded === null ? null : Boolean(row.loaded),
+        files: JSON.parse(row.files),
+        moduleCount: ctx.db.prepare('SELECT count(*) AS n FROM module_chunks WHERE chunk_id=?').get(row.id).n,
+        generated: row.emitted_bytes === null ? null : {
+          emittedBytes: row.emitted_bytes, loadedBytes: row.loaded_bytes,
+          executedBytes: row.executed_bytes, unexecutedBytes: row.unexecuted_bytes,
+        },
+      };
+      const sz = Buffer.byteLength(json(item));
+      if (chunkBytes + sz > 16 * 1024 && chunkRows.length) break;
+      chunkRows.push(item); chunkBytes += sz;
+    }
+  }
+  return {
+    mode: 'overview',
+    coverageAvailable: ctx.meta.coverageAvailable,
+    filters: {
+      ...(ctx.args['multi-origin'] ? { multiOrigin: true } : {}),
+      ...(ctx.args.loaded ? { loaded: true } : {}),
+      ...(ctx.args.search ? { search: ctx.args.search } : {}),
+    },
+    ...groupsPage,
+    chunks: { items: chunkRows, total: chunkTotal },
+  };
 }
 
 function runQuery(ctx) {

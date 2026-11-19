@@ -149,11 +149,21 @@ function buildIndex(args) {
     if (usage && coverage && ![...moduleRows.values()].some(row => row.adapterIds.usage && row.adapterIds.coverage))
       fail('INPUT_IDENTITY_MISMATCH', 'No identical module identifier/layer pairs connect these inputs.');
     if (coverage) {
+      const readFlags = coverage.db.prepare('SELECT transformed IS NOT NULL AS has_transformed,transformed_hash,resource_content IS NOT NULL AS has_resource,resource_hash FROM modules WHERE id=?');
+      const readText = coverage.db.prepare('SELECT transformed,resource_content FROM modules WHERE id=?');
       for (const row of coverage.modules()) {
         const moduleId = moduleMaps.coverage.get(row.id);
-        const captured = coverage.db.prepare('SELECT transformed,transformed_hash,resource_content,resource_hash FROM modules WHERE id=?').get(row.id);
-        if (typeof captured?.resource_content === 'string') addSource(moduleId, row.resource || row.identifier, 'resource', captured.resource_hash || hash(captured.resource_content), { adapter: 'usage', file: coverage.database, module: row.id, space: 'resource' });
-        if (typeof captured?.transformed === 'string') addSource(moduleId, row.identifier, 'post-loader', captured.transformed_hash || hash(captured.transformed), { adapter: 'usage', file: coverage.database, module: row.id, space: 'post-loader' });
+        const captured = readFlags.get(row.id);
+        if (!captured) continue;
+        let resourceHash = captured.resource_hash;
+        let transformedHash = captured.transformed_hash;
+        if ((captured.has_resource && !resourceHash) || (captured.has_transformed && !transformedHash)) {
+          const texts = readText.get(row.id);
+          if (captured.has_resource && !resourceHash && typeof texts?.resource_content === 'string') resourceHash = hash(texts.resource_content);
+          if (captured.has_transformed && !transformedHash && typeof texts?.transformed === 'string') transformedHash = hash(texts.transformed);
+        }
+        if (captured.has_resource) addSource(moduleId, row.resource || row.identifier, 'resource', resourceHash, { adapter: 'usage', file: coverage.database, module: row.id, space: 'resource' });
+        if (captured.has_transformed) addSource(moduleId, row.identifier, 'post-loader', transformedHash, { adapter: 'usage', file: coverage.database, module: row.id, space: 'post-loader' });
       }
     }
     const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');

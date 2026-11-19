@@ -61,9 +61,12 @@ node <skill>/scripts/query.cjs status --db <index.sqlite> --gaps [--module <id>]
 
 ### 2. 查 Chunk Groups 与多 origin 合并（`chunks`）
 ```sh
-node <skill>/scripts/query.cjs chunks --db <index.sqlite>
-# 下钻分析标有 [MULTI] 的 chunk group（检查已执行 vs 未执行 origin 静态可达模块）：
+# 一步筛选已加载的多 origin 合并 chunk group（支持 --multi-origin / --loaded / --search）
+node <skill>/scripts/query.cjs chunks --db <index.sqlite> --multi-origin --loaded
+# 下钻分析指定 chunk group（检查已执行 vs 未执行 origin 静态可达模块）：
 node <skill>/scripts/query.cjs chunks --db <index.sqlite> --group <groupId-or-name>
+# 大型 chunk group 分段翻页查看 origins / chunks / candidates：
+node <skill>/scripts/query.cjs chunks --db <index.sqlite> --group <groupId> --section origins --offset 20 --limit 20
 # 查看单个 chunk 内的模块列表：
 node <skill>/scripts/query.cjs chunks --db <index.sqlite> --chunk <chunkId>
 ```

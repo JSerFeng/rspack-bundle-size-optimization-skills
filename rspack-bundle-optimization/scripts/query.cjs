@@ -5,7 +5,7 @@ const { buildIndex } = require('./lib/index.cjs');
 const { runQuery, MODULE_SORT } = require('./lib/queries.cjs');
 const { formatText, formatErrorText } = require('./lib/format.cjs');
 
-const BOOL_FLAGS = new Set(['help', 'gaps', 'unexecuted', 'no-code']);
+const BOOL_FLAGS = new Set(['help', 'gaps', 'unexecuted', 'no-code', 'multi-origin', 'loaded']);
 const COMMAND_SPECS = {
   index: {
     summary: 'Build a query index from a build capture (and optional browser recording or pre-analyzed coverage).',
@@ -39,18 +39,20 @@ const COMMAND_SPECS = {
   },
   chunks: {
     summary: 'Inspect chunk groups, origins, chunk sizes, and candidate unnecessary modules from merged chunks.',
-    usage: 'query.cjs chunks --db <index.sqlite> [--group <groupId|name> | --chunk <chunkId>]',
-    options: ['db', 'run', 'format', 'group', 'chunk', 'limit', 'cursor', 'sort'],
+    usage: 'query.cjs chunks --db <index.sqlite> [--multi-origin] [--loaded] [--search <str>] | --group <id|name> [--section chunks|origins|candidates --offset <n>] | --chunk <id>',
+    options: ['db', 'run', 'format', 'group', 'chunk', 'multi-origin', 'loaded', 'search', 'section', 'offset', 'limit', 'cursor', 'sort'],
     required: ['--db'],
     sortFields: ['id', 'name (overview)', '...module sort fields (with --chunk)'],
     details: [
-      'Default lists all chunk groups (flagging multi-origin groups) and chunks.',
-      '--group <id> inspects origins, execution status, and modules statically reachable only from unexecuted origins.',
+      'Overview lists chunk groups; filter with --multi-origin, --loaded, or --search <substring>.',
+      '--group <id|name> inspects origins, execution status, and modules statically reachable only from unexecuted origins.',
+      'For large groups, paginate one section with --group <id> --section chunks|origins|candidates --offset <n> --limit <m>.',
       '--chunk <id> lists modules inside a chunk sorted by unexecuted bytes.',
     ],
     examples: [
-      'query.cjs chunks --db index.sqlite',
+      'query.cjs chunks --db index.sqlite --multi-origin --loaded',
       'query.cjs chunks --db index.sqlite --group vendors',
+      'query.cjs chunks --db index.sqlite --group vendors --section origins --offset 20',
       'query.cjs chunks --db index.sqlite --chunk main',
     ],
   },

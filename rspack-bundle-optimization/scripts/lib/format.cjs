@@ -203,84 +203,128 @@ function fmtChunks(data) {
     if (ch.generated) {
       lines.push(`generated: emitted=${fmtBytes(ch.generated.emittedBytes)} | loaded=${fmtBytes(ch.generated.loadedBytes)} | exec=${fmtBytes(ch.generated.executedBytes)} (${fmtPct(ch.generated.executionRatio)}) | unexec=${fmtBytes(ch.generated.unexecutedBytes)}`);
     }
-    lines.push('', fmtTable(
-      ['moduleId', 'path', 'gen.unexec', 'gen.loaded', 'exec%', 'used'],
-      data.items.map(m => [
-        m.moduleId, m.path,
-        fmtBytes(m.coverage?.generated?.unexecutedBytes),
-        fmtBytes(m.coverage?.generated?.loadedBytes),
-        fmtPct(m.coverage?.generated?.executionRatio),
-        fmtUsed(m.usage),
-      ]),
-      new Set([2, 3, 4]),
-    ));
+    if (data.coverageAvailable === false) {
+      lines.push('', fmtTable(
+        ['moduleId', 'path', 'used'],
+        data.items.map(m => [m.moduleId, m.path, fmtUsed(m.usage)]),
+      ));
+    } else {
+      lines.push('', fmtTable(
+        ['moduleId', 'path', 'gen.unexec', 'gen.loaded', 'exec%', 'used'],
+        data.items.map(m => [
+          m.moduleId, m.path,
+          fmtBytes(m.coverage?.generated?.unexecutedBytes),
+          fmtBytes(m.coverage?.generated?.loadedBytes),
+          fmtPct(m.coverage?.generated?.executionRatio),
+          fmtUsed(m.usage),
+        ]),
+        new Set([2, 3, 4]),
+      ));
+    }
     if (data.page.nextCursor) lines.push('', `next page: --cursor ${data.page.nextCursor}`);
     return lines.join('\n');
   }
 
   if (data.mode === 'group') {
     const g = data.group;
-    const lines = [`# Chunk Group ${g.groupId}${g.name ? ` (${g.name})` : ''}${g.multiOrigin ? ' [MULTI-ORIGIN]' : ''}`];
-    lines.push(`modules: ${g.totalModules}  chunks: ${data.chunks.length}  origins: ${data.origins.length}${g.parents.length ? `  parents: ${g.parents.join(', ')}` : ''}`);
-    lines.push('', '## Chunks');
-    lines.push(fmtTable(
-      ['chunkId', 'initial', 'loaded', 'modules', 'emitted', 'unexec', 'files'],
-      data.chunks.map(c => [
-        c.chunkId, c.initial, c.loaded === null ? 'unknown' : c.loaded, c.moduleCount,
-        fmtBytes(c.generated?.emittedBytes), fmtBytes(c.generated?.unexecutedBytes), c.files.join(', ') || '-',
-      ]),
-      new Set([3, 4, 5]),
-    ));
-    lines.push('', '## Origins');
-    lines.push(fmtTable(
-      ['origin', 'request', 'entryModules', 'status', 'reachableMods'],
-      data.origins.map(o => [
-        o.moduleId ? `${o.path || '?'} (${o.moduleId})` : '<entry>',
-        o.request || '-',
-        o.entryPaths.join(', ') || '-',
-        o.executionStatus,
-        o.reachableModuleCount,
-      ]),
-      new Set([4]),
-    ));
-    const a = data.analysis;
-    lines.push('', '## Origin Reachability Analysis');
-    if (!a.coverageAvailable) {
-      lines.push('Coverage unavailable; cannot distinguish executed vs unexecuted origins.');
-    } else if (a.unnecessaryCandidateCount > 0) {
-      lines.push(`executed origins: ${a.executedOriginCount}, unexecuted origins: ${a.unexecutedOriginCount} -> ${a.unnecessaryCandidateCount} candidate unnecessary module(s) (${fmtBytes(a.unnecessaryCandidateBytes)} unexecuted) reachable only from unexecuted origin(s):`);
-      lines.push('', fmtTable(
-        ['moduleId', 'path', 'emitted', 'unexec'],
-        a.candidates.map(m => [m.moduleId, m.path, fmtBytes(m.emittedBytes), fmtBytes(m.unexecutedBytes)]),
-        new Set([2, 3]),
+    const secNote = data.section ? ` [section=${data.section}, offset=${data.sectionPage.offset}, showing ${data.sectionPage.returned}/${data.sectionPage.total}]` : '';
+    const lines = [`# Chunk Group ${g.groupId}${g.name ? ` (${g.name})` : ''}${g.multiOrigin ? ' [MULTI-ORIGIN]' : ''}${secNote}`];
+    lines.push(`modules: ${g.totalModules}  chunks: ${g.chunksTotal ?? data.chunks.length}  origins: ${g.originsTotal ?? data.origins.length}${g.parents.length ? `  parents: ${g.parents.join(', ')}` : ''}`);
+
+    if (!data.section || data.section === 'chunks') {
+      const total = g.chunksTotal ?? data.chunks.length;
+      lines.push('', `## Chunks (${data.chunks.length}/${total})`);
+      lines.push(fmtTable(
+        ['chunkId', 'initial', 'loaded', 'modules', 'emitted', 'unexec', 'files'],
+        data.chunks.map(c => [
+          c.chunkId, c.initial, c.loaded === null ? 'unknown' : c.loaded, c.moduleCount,
+          fmtBytes(c.generated?.emittedBytes), fmtBytes(c.generated?.unexecutedBytes), c.files.join(', ') || '-',
+        ]),
+        new Set([3, 4, 5]),
       ));
-    } else {
-      lines.push(`executed origins: ${a.executedOriginCount}, unexecuted origins: ${a.unexecutedOriginCount} -> no modules uniquely attributable to unexecuted origins.`);
+      if (!data.section && data.chunks.length < total) lines.push(`more chunks: chunks --group ${g.groupId} --section chunks --offset ${data.chunks.length}`);
+    }
+
+    if (!data.section || data.section === 'origins') {
+      const total = g.originsTotal ?? data.origins.length;
+      lines.push('', `## Origins (${data.origins.length}/${total})`);
+      lines.push(fmtTable(
+        ['origin', 'request', 'entryModules', 'status', 'reachableMods'],
+        data.origins.map(o => [
+          o.moduleId ? `${o.path || '?'} (${o.moduleId})` : '<entry>',
+          o.request || '-',
+          o.entryPaths.join(', ') || '-',
+          o.executionStatus,
+          o.reachableModuleCount,
+        ]),
+        new Set([4]),
+      ));
+      if (!data.section && data.origins.length < total) lines.push(`more origins: chunks --group ${g.groupId} --section origins --offset ${data.origins.length}`);
+    }
+
+    if (!data.section || data.section === 'candidates') {
+      const a = data.analysis;
+      lines.push('', '## Origin Reachability Analysis');
+      if (!a.coverageAvailable) {
+        lines.push('Coverage unavailable; cannot distinguish executed vs unexecuted origins.');
+      } else if (a.unnecessaryCandidateCount > 0) {
+        lines.push(`executed origins: ${a.executedOriginCount}, unexecuted origins: ${a.unexecutedOriginCount} -> ${a.unnecessaryCandidateCount} candidate unnecessary module(s) (${fmtBytes(a.unnecessaryCandidateBytes)} unexecuted) reachable only from unexecuted origin(s) (showing ${a.candidates.length}/${a.unnecessaryCandidateCount}):`);
+        lines.push('', fmtTable(
+          ['moduleId', 'path', 'emitted', 'unexec'],
+          a.candidates.map(m => [m.moduleId, m.path, fmtBytes(m.emittedBytes), fmtBytes(m.unexecutedBytes)]),
+          new Set([2, 3]),
+        ));
+        if (!data.section && a.candidates.length < a.unnecessaryCandidateCount) lines.push(`more candidates: chunks --group ${g.groupId} --section candidates --offset ${a.candidates.length}`);
+      } else {
+        lines.push(`executed origins: ${a.executedOriginCount}, unexecuted origins: ${a.unexecutedOriginCount} -> no modules uniquely attributable to unexecuted origins.`);
+      }
+    }
+
+    if (data.section && data.sectionPage?.nextOffset !== null) {
+      lines.push('', `next page: chunks --group ${g.groupId} --section ${data.section} --offset ${data.sectionPage.nextOffset}`);
     }
     return lines.join('\n');
   }
 
   // Overview
-  const lines = [`# Chunks & Chunk Groups (groups=${data.page.total}, chunks=${data.chunks.total})`];
+  const filterBits = [];
+  if (data.filters?.multiOrigin) filterBits.push('multi-origin');
+  if (data.filters?.loaded) filterBits.push('loaded');
+  if (data.filters?.search) filterBits.push(`search=${data.filters.search}`);
+  const filterStr = filterBits.length ? `, filter=${filterBits.join(',')}` : '';
+  const lines = [`# Chunks & Chunk Groups (groups=${data.page.total}, chunks=${data.chunks.total}${filterStr})`];
   if (data.items.length) {
     lines.push('', `## Chunk Groups (showing ${data.page.returned}/${data.page.total})`);
-    lines.push(fmtTable(
-      ['groupId', 'name', 'chunks', 'loaded', 'mods', 'emitted', 'unexec', 'origins'],
-      data.items.map(g => [
-        g.groupId,
-        `${g.name || '-'}${g.multiOrigin ? ' [MULTI]' : ''}`,
-        g.chunkIds.join(','),
-        g.loaded === null ? 'unknown' : g.loaded,
-        g.moduleCount,
-        fmtBytes(g.emittedBytes),
-        fmtBytes(g.unexecutedBytes),
-        `${g.originCount}: ${g.origins.map(o => o.request || o.path || '<entry>').join(', ')}`,
-      ]),
-      new Set([4, 5, 6]),
-    ));
+    if (data.coverageAvailable === false) {
+      lines.push(fmtTable(
+        ['groupId', 'name', 'chunks', 'mods', 'origins'],
+        data.items.map(g => [
+          g.groupId,
+          `${g.name || '-'}${g.multiOrigin ? ' [MULTI]' : ''}`,
+          g.chunkIds.join(','),
+          g.moduleCount,
+          `${g.originCount}: ${g.origins.map(o => o.request || o.path || '<entry>').join(', ')}`,
+        ]),
+        new Set([3]),
+      ));
+    } else {
+      lines.push(fmtTable(
+        ['groupId', 'name', 'chunks', 'loaded', 'mods', 'emitted', 'unexec', 'origins'],
+        data.items.map(g => [
+          g.groupId,
+          `${g.name || '-'}${g.multiOrigin ? ' [MULTI]' : ''}`,
+          g.chunkIds.join(','),
+          g.loaded === null ? 'unknown' : g.loaded,
+          g.moduleCount,
+          fmtBytes(g.emittedBytes),
+          fmtBytes(g.unexecutedBytes),
+          `${g.originCount}: ${g.origins.map(o => o.request || o.path || '<entry>').join(', ')}`,
+        ]),
+        new Set([4, 5, 6]),
+      ));
+    }
     if (data.page.nextCursor) lines.push(`next page: --cursor ${data.page.nextCursor}`);
-  }
-  if (data.chunks.items.length) {
+  } else if (data.chunks.items.length) {
     lines.push('', `## Chunks (showing ${data.chunks.items.length}/${data.chunks.total})`);
     lines.push(fmtTable(
       ['chunkId', 'initial', 'loaded', 'mods', 'emitted', 'unexec', 'files'],
@@ -290,8 +334,10 @@ function fmtChunks(data) {
       ]),
       new Set([3, 4, 5]),
     ));
+  } else {
+    lines.push('', '(no matching chunk groups)');
   }
-  lines.push('', 'hint: inspect a chunk group with `chunks --group <groupId>` or a chunk with `chunks --chunk <chunkId>`');
+  lines.push('', 'hint: filter with `chunks --multi-origin [--loaded] [--search <name>]`, inspect a group with `chunks --group <groupId>`, or a chunk with `chunks --chunk <chunkId>`');
   return lines.join('\n');
 }
 
@@ -311,6 +357,19 @@ function fmtModules(data) {
       return val;
     };
     lines.push('', fmtTable(cols, data.items.map(m => cols.map(c => read(m, c)))));
+  } else if (data.coverageAvailable === false) {
+    lines.push('', fmtTable(
+      ['moduleId', 'path', 'pkg', 'used', 'inRefs', 'consumers'],
+      data.items.map(m => [
+        m.moduleId,
+        m.path ?? m.identifier ?? '-',
+        m.package ?? '-',
+        fmtUsed(m.usage),
+        m.usage?.incomingReferences ?? 'unknown',
+        m.usage?.distinctConsumers ?? 'unknown',
+      ]),
+      new Set([4, 5]),
+    ));
   } else {
     lines.push('', fmtTable(
       ['moduleId', 'path', 'pkg', 'gen.unexec', 'gen.loaded', 'exec%', 'used', 'inRefs', 'consumers'],
@@ -345,7 +404,12 @@ function fmtModule(data) {
   metaBits.push(`loaded: ${data.loaded === null ? 'unknown' : data.loaded}`);
   metaBits.push(`initial: ${data.initial === null ? 'unknown' : data.initial}`);
   lines.push(metaBits.join('  '));
-  if (data.identifier && data.identifier !== data.path) lines.push(`identifier: ${data.identifier}`);
+  if (data.identifier && data.identifier !== data.path) {
+    const ident = data.identifier.length > 180
+      ? `${data.identifier.slice(0, 120)}... (${data.identifier.length} chars; use --format json for full)`
+      : data.identifier;
+    lines.push(`identifier: ${ident}`);
+  }
 
   if (data.chunks?.length) {
     lines.push(`chunks: ${data.chunks.map(c => `${c.chunkId}(${c.initial ? 'init,' : ''}loaded=${c.loaded === null ? '?' : c.loaded}${c.files.length ? ',' + c.files.join('+') : ''})`).join(', ')}`);
@@ -613,11 +677,18 @@ function fmtChain(data) {
 
   if (data.modules?.length) {
     lines.push('', `## Modules in Chain (${data.modules.length})`);
-    lines.push(fmtTable(
-      ['moduleId', 'path', 'loaded', 'exec%', 'unexec'],
-      data.modules.map(m => [m.moduleId, m.path, m.loaded === null ? 'unknown' : m.loaded, fmtPct(m.executionRatio), fmtBytes(m.unexecutedBytes)]),
-      new Set([3, 4]),
-    ));
+    if (data.coverageAvailable === false) {
+      lines.push(fmtTable(
+        ['moduleId', 'path'],
+        data.modules.map(m => [m.moduleId, m.path]),
+      ));
+    } else {
+      lines.push(fmtTable(
+        ['moduleId', 'path', 'loaded', 'exec%', 'unexec'],
+        data.modules.map(m => [m.moduleId, m.path, m.loaded === null ? 'unknown' : m.loaded, fmtPct(m.executionRatio), fmtBytes(m.unexecutedBytes)]),
+        new Set([3, 4]),
+      ));
+    }
   }
   return lines.join('\n');
 }

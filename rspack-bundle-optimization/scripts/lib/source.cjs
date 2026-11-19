@@ -207,8 +207,16 @@ function mapReference(module, rawLoc, options = {}) {
       matchesPostLoader: transformedHash !== null && item.sourceHash === transformedHash,
     };
     if (item.coordinateSpace === 'map-source' && item.sourceIdentity.matchesPostLoader &&
-        resourceHash !== null && !item.sourceIdentity.matchesCapturedResource && !item.gap) {
-      item.gap = 'Loader map points to post-loader text; mapping to the captured resource is unavailable';
+        resourceHash !== null && !item.sourceIdentity.matchesCapturedResource) {
+      if (!item.gap) item.gap = 'Loader map points to post-loader text; mapping to the captured resource is unavailable';
+      // Line-only identity loader maps collapse exact post-loader columns to 0; preserve the exact
+      // post-loader column span on the same line while keeping the explicit mapping gap warning.
+      if (item.sourceLocation.start.line === normalizedLoc.start.line &&
+          item.sourceLocation.start.column === 0 && normalizedLoc.start.column > 0 &&
+          module.transformed !== null) {
+        const exact = candidate(module.transformed, item.sourcePath, normalizedLoc, 'map-source', 'approximate', !normalizedLoc.end, context, session);
+        if (exact) Object.assign(item, exact, { sourceIdentity: item.sourceIdentity, gap: item.gap });
+      }
     }
   }
   const unique = [...new Map(candidates.map(item => [JSON.stringify([item.sourcePath, item.sourceHash, item.sourceLocation]), item])).values()];

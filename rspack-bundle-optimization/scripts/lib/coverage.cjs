@@ -68,7 +68,7 @@ function coveredRanges(entry) {
 function* generatedSpans(text, rawMap) {
   const starts = lineStarts(text);
   if (!rawMap) { yield { start: 0, end: text.length, source: null }; return; }
-  const trace = AnyMap(rawMap); const decoded = decodedMappings(trace);
+  const trace = AnyMap(rawMap, rawMap.x_rspack_bundle_map_base_url); const decoded = decodedMappings(trace);
   for (let line = 0; line < starts.length; line++) {
     const begin = starts[line]; const end = starts[line + 1] ?? text.length;
     let contentEnd = end;

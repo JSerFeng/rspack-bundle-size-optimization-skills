@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { pathToFileURL } = require('node:url');
 const { createCapture, ensureModule, addEdge, addGap, prepare, setMeta, hash, id, json } = require('./lib/capture-store.cjs');
 
 const NAME = 'BundleEvidencePlugin';
@@ -72,25 +73,37 @@ class BundleEvidencePlugin {
           setMeta(db, { graphAvailable: true, discardedEdges: discarded }); db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); setMeta(db, { graphAvailable: false, captureError: error.message }); }
       });
-      // Runs after minimization and SourceMapDevToolPlugin. Keep production options intact.
-      compilation.hooks.afterProcessAssets.tap(NAME, () => {
+      state.captureAssets = () => {
+        const outputPath = compiler.options.output?.path;
+        const readWritten = assetName => {
+          if (!outputPath) return null;
+          const filename = path.join(outputPath, assetName);
+          return safely(() => compiler.outputFileSystem.readFileSync(filename)) ?? safely(() => fs.readFileSync(filename));
+        };
         db.exec('BEGIN');
         try {
           const assets = compilation.getAssets(); const byName = new Map(assets.map(asset => [asset.name, asset]));
           for (const asset of assets) {
             if (!/\.(?:js|mjs|cjs)$/i.test(asset.name)) continue;
-            const generated = text(asset.source.source()); let map = null; let mapError = null;
+            const written = readWritten(asset.name);
+            const generated = text(written ?? safely(() => asset.source?.source()));
+            if (generated === null) {
+              addGap(db, null, 'asset-source', { name: asset.name, message: 'Final JavaScript asset was unavailable.' });
+              continue;
+            }
+            let map = null; let mapError = null;
             try {
-              map = safely(() => asset.source.map({ columns: true }));
               const related = asset.info?.related?.sourceMap;
               const comment = [...generated.matchAll(/[#@]\s*sourceMappingURL=([^\s*]+)/g)].at(-1)?.[1];
               const mapName = typeof related === 'string' ? related : comment && !comment.startsWith('data:') ? path.posix.normalize(path.posix.join(path.posix.dirname(asset.name), comment)) : null;
-              if (!map && mapName && byName.has(mapName)) map = JSON.parse(text(byName.get(mapName).source.source()));
+              if (mapName && byName.has(mapName)) map = JSON.parse(text(readWritten(mapName) ?? safely(() => byName.get(mapName).source?.source())));
+              else map = safely(() => asset.source?.map({ columns: true }));
               if (!map && comment?.startsWith('data:')) {
                 const comma = comment.indexOf(','); const header = comment.slice(0, comma); const value = comment.slice(comma + 1);
                 map = JSON.parse(header.includes(';base64') ? Buffer.from(value, 'base64').toString('utf8') : decodeURIComponent(value));
               }
               if (typeof map === 'string') map = JSON.parse(map);
+              if (map && outputPath) map = { ...map, x_rspack_bundle_map_base_url: pathToFileURL(path.join(outputPath, mapName ?? asset.name)).href };
               if (!map) mapError = 'No full asset source map was emitted. Use hidden-source-map or source-map for source attribution.';
             } catch (error) { mapError = error.message; }
             const publicPath = compiler.options.output?.publicPath;
@@ -99,8 +112,12 @@ class BundleEvidencePlugin {
           }
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
-      });
+      };
       state.visit = visit;
+    });
+    // Emit hooks (e.g. obfuscation/security plugins) can rewrite final assets after afterProcessAssets.
+    compiler.hooks.afterEmit.tap({ name: NAME, stage: Number.MAX_SAFE_INTEGER }, compilation => {
+      captures.get(compilation)?.captureAssets();
     });
     compiler.hooks.done.tap(NAME, stats => {
       const state = captures.get(stats.compilation); if (!state || state.closed) return;

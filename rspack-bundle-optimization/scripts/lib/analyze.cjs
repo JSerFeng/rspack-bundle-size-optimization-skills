@@ -55,6 +55,7 @@ function computeAnalysis(args) {
       const value = readAsset.get(asset.id); const generated = value.content; const prefix = utf8Prefix(generated);
       const loaded = networkOnly.has(asset.id) ? null : matched.has(asset.id); const ranges = matched.get(asset.id)?.ranges || []; const chunks = JSON.parse(asset.chunks);
       const assetMetrics = byteMetrics(); let rangeCursor = 0;
+      const assetSources = new Map();
       let spans;
       try { spans = [...generatedSpans(generated, value.source_map ? JSON.parse(value.source_map) : null)]; }
       catch (error) { warnings.push({ asset: asset.name, kind: 'source-map', message: error.message }); spans = [{ start: 0, end: generated.length, source: null }]; }
@@ -69,16 +70,26 @@ function computeAnalysis(args) {
         addBytes(assetMetrics, emitted, loadedBytes, executed);
         if (!span.source) { assetMetrics.unmappedBytes += emitted; continue; }
         assetMetrics.mappedBytes += emitted;
-        const canonical = canonicalSource(span.source, metadata.context); const content = typeof span.content === 'string' ? span.content : null;
-        const key = id('file', [canonical, content === null ? null : hash(content)]);
-        let file = files.get(key);
-        if (!file) {
-          file = { id: key, path: sourcePathForContext(span.source, metadata.context), canonical, content, metrics: byteMetrics(), lines: new Map(),
-            moduleIds: new Set(), perModule: new Map(), ambiguous: new Set(), chunks: new Set(), loadedChunks: new Set() }; files.set(key, file);
+        const content = typeof span.content === 'string' ? span.content : null;
+        let sourceVariants = assetSources.get(span.source);
+        if (!sourceVariants) assetSources.set(span.source, sourceVariants = new Map());
+        let source = sourceVariants.get(content);
+        if (!source) {
+          const canonical = canonicalSource(span.source, metadata.context);
+          const contentHash = content === null ? null : hash(content);
+          const key = id('file', [canonical, contentHash]);
+          let file = files.get(key);
+          if (!file) {
+            file = { id: key, path: sourcePathForContext(span.source, metadata.context), canonical, content, contentHash, metrics: byteMetrics(), lines: new Map(),
+              moduleIds: new Set(), perModule: new Map(), ambiguous: new Set(), chunks: new Set(), loadedChunks: new Set() };
+            files.set(key, file);
+          }
+          const candidates = (bySource.get(canonical) || []).filter(module => chunks.some(chunk => memberships.get(module.id)?.has(chunk)));
+          sourceVariants.set(content, source = { file, candidates });
+          for (const chunk of chunks) { file.chunks.add(chunk); if (loaded) file.loadedChunks.add(chunk); }
         }
+        const { file, candidates } = source;
         addBytes(file.metrics, emitted, loadedBytes, executed);
-        for (const chunk of chunks) { file.chunks.add(chunk); if (loaded) file.loadedChunks.add(chunk); }
-        const candidates = (bySource.get(canonical) || []).filter(module => chunks.some(chunk => memberships.get(module.id)?.has(chunk)));
         for (const module of candidates) file.moduleIds.add(module.id);
         const line = file.lines.get(span.line) || { lineIndex: span.line, ...byteMetrics(), ranges: [], states: new Map(), ambiguous: new Set() };
         addBytes(line, emitted, loadedBytes, executed);
@@ -104,7 +115,7 @@ function computeAnalysis(args) {
       return result;
     };
     const fileRecords = [...files.values()].map(file => {
-      const moduleIds = [...file.moduleIds]; const knownHash = file.content === null ? null : hash(file.content);
+      const moduleIds = [...file.moduleIds]; const knownHash = file.contentHash;
       const verifiedOriginal = knownHash !== null && moduleIds.some(key => modulesById.get(key)?.resource_hash === knownHash);
       const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => ({ lineIndex: line.lineIndex,
         emittedBytes: line.emittedBytes, loadedBytes: line.loadedBytes, executedBytes: line.executedBytes, ranges: line.ranges,
