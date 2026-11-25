@@ -22,6 +22,7 @@ plugins: [new BundleEvidencePlugin({ directory: '/absolute/path/to/build-evidenc
 运行真实 production command。插件为每次成功构建保存独立 SQLite，并在 directory 的
 latest.json 中记录 file/buildHash；stderr 也输出完整路径。每个 compiler 用独立目录。
 失败构建不发布 complete 快照，不能沿用旧 latest 冒充新结果。
+在 EdenX / Rsbuild / Modern.js 等框架中接入时，构建日志应出现 `[BundleEvidencePlugin]` 输出且目标目录生成 `latest.json`；若框架 hook 后续重置了 `config.plugins`（导致 `appendPlugins` 失效），请直接在最终生效的 `tools.rspack` 回调里追加到 `config.plugins` 并复核产物。
 
 快照包含产物全文与 hash、asset sourcemap、模块完整 identifier/layer、构建时源码及
 loader map、chunk 归属、chunk group/origin、module graph 和可用的原生 export usage graph。
@@ -47,7 +48,7 @@ node <skill>/scripts/record.cjs --endpoint http://127.0.0.1:<debug-port> \
   --out /absolute/path/to/recording.json --scenario first-screen
 ```
 
-endpoint 也可传页面 WebSocket URL。多个页面时用 --target <CDP-target-id> 选择，选择错误
+endpoint 也可传页面 WebSocket URL（注意：仅使用 `--remote-debugging-pipe` 的 Chrome DevTools MCP 实例不暴露 HTTP/WS 端口，需连接带 `--remote-debugging-port` 的 Chrome）。多个页面时用 --target <CDP-target-id> 选择，选择错误
 会返回可用页面列表；CDP target ID 与 MCP 的 pageId 不同。
 --ready-expression 'globalThis.appReady === true' 可替代 selector，必须明确一种首屏完成条件。
 不要用未校验的固定等待时间代替业务就绪条件。默认超时 30 秒，--timeout 单位毫秒。

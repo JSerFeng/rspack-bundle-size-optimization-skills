@@ -133,6 +133,11 @@ function fmtIndex(data) {
     const g = data.generated;
     const ratio = g.loadedBytes > 0 && g.executedBytes !== null ? g.executedBytes / g.loadedBytes : null;
     lines.push(`generated: emitted=${fmtBytes(g.emittedBytes)}  loaded=${fmtBytes(g.loadedBytes)}  exec=${fmtBytes(g.executedBytes)} (${fmtPct(ratio)})  unexec=${fmtBytes(g.unusedBytes)}  mapped=${fmtBytes(g.mappedBytes)}  unmapped=${fmtBytes(g.unmappedBytes)}`);
+    if (g.observed) {
+      const o = g.observed;
+      const oRatio = o.loadedBytes > 0 && o.executedBytes !== null ? o.executedBytes / o.loadedBytes : null;
+      lines.push(`observed (${o.matchedAssets} matched assets, excl. ${o.unknownAssets} network-without-coverage): loaded=${fmtBytes(o.loadedBytes)}  exec=${fmtBytes(o.executedBytes)} (${fmtPct(oRatio)})  unexec=${fmtBytes(o.unusedBytes)}`);
+    }
   }
   lines.push(`next: query.cjs status --db ${data.database}`);
   return lines.join('\n');
@@ -172,22 +177,30 @@ function fmtStatus(data) {
     const g = data.generated;
     const ratio = g.loadedBytes > 0 && g.executedBytes !== null ? g.executedBytes / g.loadedBytes : null;
     lines.push('', '## Generated JS (UTF-8)');
-    lines.push(`emitted: ${fmtBytesExact(g.emittedBytes)} | mapped: ${fmtBytes(g.mappedBytes)} | unmapped: ${fmtBytes(g.unmappedBytes)}`);
-    lines.push(`loaded:  ${fmtBytesExact(g.loadedBytes)} | executed: ${fmtBytes(g.executedBytes)} (${fmtPct(ratio)}) | unexecuted: ${fmtBytes(g.unusedBytes)}`);
+    lines.push(`emitted:  ${fmtBytesExact(g.emittedBytes)} | mapped: ${fmtBytes(g.mappedBytes)} | unmapped: ${fmtBytes(g.unmappedBytes)}`);
+    if (g.observed) {
+      const o = g.observed;
+      const oRatio = o.loadedBytes > 0 && o.executedBytes !== null ? o.executedBytes / o.loadedBytes : null;
+      lines.push(`loaded:   unknown (${o.unknownAssets} network-without-coverage assets, ${fmtBytes(o.unknownEmittedBytes)} emitted) | executed: unknown | unexecuted: unknown`);
+      lines.push(`observed (${o.matchedAssets} matched assets): loaded=${fmtBytesExact(o.loadedBytes)} | executed=${fmtBytes(o.executedBytes)} (${fmtPct(oRatio)}) | unexecuted=${fmtBytes(o.unusedBytes)}`);
+    } else {
+      lines.push(`loaded:   ${fmtBytesExact(g.loadedBytes)} | executed: ${fmtBytes(g.executedBytes)} (${fmtPct(ratio)}) | unexecuted: ${fmtBytes(g.unusedBytes)}`);
+    }
   }
   if (data.recording) {
     const r = data.recording;
     lines.push('', '## Recording');
     lines.push(`matchedAssets: ${r.matchedAssets}  ignoredScripts: ${r.ignoredScripts}  mappingWarnings: ${r.mappingWarnings}  scopeGaps: ${r.scopeGaps}`);
   }
+  const kindSummary = data.gapKinds?.length ? data.gapKinds.map(k => `${k.kind}=${k.count}`).join(', ') : '';
   if (data.gapsPreview?.length) {
-    lines.push('', `## Gaps (${data.gapsPreview.length}/${c.gaps})`);
+    lines.push('', `## Gaps (${data.gapsPreview.length}/${c.gaps}${kindSummary ? `: ${kindSummary}` : ''})`);
     lines.push(fmtTable(
       ['kind', 'module', 'detail'],
       data.gapsPreview.map(g => [g.kind, g.moduleId ? `${g.modulePath || '?'} (${g.moduleId})` : '-', fmtGapDetail(g.detail)]),
     ));
   } else if (c.gaps > 0) {
-    lines.push('', `gaps: ${c.gaps} -> inspect with \`status --gaps\``);
+    lines.push('', `gaps: ${c.gaps}${kindSummary ? ` (${kindSummary})` : ''} -> inspect with \`status --gaps --kind <kind>\``);
   }
   lines.push('', '## Notes');
   lines.push('- coverage is recording evidence only (not removable-code or gzip proof); unknown != 0.');
@@ -205,21 +218,24 @@ function fmtChunks(data) {
     }
     if (data.coverageAvailable === false) {
       lines.push('', fmtTable(
-        ['moduleId', 'path', 'used'],
-        data.items.map(m => [m.moduleId, m.path, fmtUsed(m.usage)]),
+        ['moduleId', 'path', 'chunks', 'used'],
+        data.items.map(m => [m.moduleId, m.path, m.chunkCount ?? '-', fmtUsed(m.usage)]),
+        new Set([2]),
       ));
     } else {
       lines.push('', fmtTable(
-        ['moduleId', 'path', 'gen.unexec', 'gen.loaded', 'exec%', 'used'],
+        ['moduleId', 'path', 'chunks', 'mod.unexec', 'mod.loaded', 'exec%', 'used'],
         data.items.map(m => [
           m.moduleId, m.path,
+          m.chunkCount ?? '-',
           fmtBytes(m.coverage?.generated?.unexecutedBytes),
           fmtBytes(m.coverage?.generated?.loadedBytes),
           fmtPct(m.coverage?.generated?.executionRatio),
           fmtUsed(m.usage),
         ]),
-        new Set([2, 3, 4]),
+        new Set([2, 3, 4, 5]),
       ));
+      lines.push('note: mod.unexec / mod.loaded are cross-chunk module totals (not split per chunk); chunks > 1 means the module is emitted into multiple chunks.');
     }
     if (data.page.nextCursor) lines.push('', `next page: --cursor ${data.page.nextCursor}`);
     return lines.join('\n');
@@ -229,7 +245,10 @@ function fmtChunks(data) {
     const g = data.group;
     const secNote = data.section ? ` [section=${data.section}, offset=${data.sectionPage.offset}, showing ${data.sectionPage.returned}/${data.sectionPage.total}]` : '';
     const lines = [`# Chunk Group ${g.groupId}${g.name ? ` (${g.name})` : ''}${g.multiOrigin ? ' [MULTI-ORIGIN]' : ''}${secNote}`];
-    lines.push(`modules: ${g.totalModules}  chunks: ${g.chunksTotal ?? data.chunks.length}  origins: ${g.originsTotal ?? data.origins.length}${g.parents.length ? `  parents: ${g.parents.join(', ')}` : ''}`);
+    const chunksSummary = g.loadedChunks !== null && g.loadedChunks !== undefined
+      ? `${g.loadedChunks}/${g.chunksTotal ?? data.chunks.length} loaded${g.unknownChunks ? ` (${g.unknownChunks} unknown)` : ''}`
+      : `${g.chunksTotal ?? data.chunks.length}`;
+    lines.push(`modules: ${g.totalModules}  chunks: ${chunksSummary}  origins: ${g.originsTotal ?? data.origins.length}${g.parents.length ? `  parents: ${g.parents.join(', ')}` : ''}`);
 
     if (!data.section || data.section === 'chunks') {
       const total = g.chunksTotal ?? data.chunks.length;
@@ -275,6 +294,8 @@ function fmtChunks(data) {
           new Set([2, 3]),
         ));
         if (!data.section && a.candidates.length < a.unnecessaryCandidateCount) lines.push(`more candidates: chunks --group ${g.groupId} --section candidates --offset ${a.candidates.length}`);
+      } else if (a.executedOriginCount === 0) {
+        lines.push(`executed origins: 0, unexecuted origins: ${a.unexecutedOriginCount} -> no executed origin baseline in this recording (group likely not triggered; cannot isolate unnecessary modules).`);
       } else {
         lines.push(`executed origins: ${a.executedOriginCount}, unexecuted origins: ${a.unexecutedOriginCount} -> no modules uniquely attributable to unexecuted origins.`);
       }
@@ -308,13 +329,20 @@ function fmtChunks(data) {
         new Set([3]),
       ));
     } else {
+      const fmtGroupLoaded = g => {
+        if (g.loadState === 'loaded') return `yes (${g.loadedChunks}/${g.totalChunks})`;
+        if (g.loadState === 'shared-only') return `shared (${g.loadedChunks}/${g.totalChunks})`;
+        if (g.loadState === 'not-loaded') return `no (0/${g.totalChunks})`;
+        if (g.loadState === 'partial-unknown') return `unknown (${g.loadedChunks}/${g.totalChunks}, ?${g.unknownChunks})`;
+        return g.loaded === null ? 'unknown' : String(g.loaded);
+      };
       lines.push(fmtTable(
         ['groupId', 'name', 'chunks', 'loaded', 'mods', 'emitted', 'unexec', 'origins'],
         data.items.map(g => [
           g.groupId,
           `${g.name || '-'}${g.multiOrigin ? ' [MULTI]' : ''}`,
           g.chunkIds.join(','),
-          g.loaded === null ? 'unknown' : g.loaded,
+          fmtGroupLoaded(g),
           g.moduleCount,
           fmtBytes(g.emittedBytes),
           fmtBytes(g.unexecutedBytes),
@@ -337,7 +365,7 @@ function fmtChunks(data) {
   } else {
     lines.push('', '(no matching chunk groups)');
   }
-  lines.push('', 'hint: filter with `chunks --multi-origin [--loaded] [--search <name>]`, inspect a group with `chunks --group <groupId>`, or a chunk with `chunks --chunk <chunkId>`');
+  lines.push('', 'hint: filter with `chunks --multi-origin [--loaded] [--search <name>] [--sort unexecutedBytes:desc]`, inspect a group with `chunks --group <groupId>`, or a chunk with `chunks --chunk <chunkId>`');
   return lines.join('\n');
 }
 
@@ -461,7 +489,8 @@ function fmtSource(data) {
     lines.push('', fmtTable(
       ['line', 'state', 'unexec', 'loaded', 'code'],
       data.items.map(item => [
-        item.line, item.runtimeState,
+        item.line,
+        item.partial ? 'partial' : item.runtimeState,
         fmtBytes(item.generated?.unexecutedBytes),
         fmtBytes(item.generated?.loadedBytes),
         item.code ?? '-',
@@ -471,6 +500,13 @@ function fmtSource(data) {
     if (data.page.nextCursor) lines.push('', `next page: --cursor ${data.page.nextCursor}`);
     if (data.items.length) {
       lines.push(`hint: read surrounding code with \`source --module ${data.moduleId} --line ${Math.max(1, data.items[0].line - 5)}\``);
+    } else if (data.lineSummary) {
+      const s = data.lineSummary;
+      if (s.totalLines === 0) {
+        lines.push(`note: no mapped coverage lines exist for this module (module generated unexecuted=${fmtBytes(s.moduleGeneratedUnexecutedBytes)}; inspect \`module --module ${data.moduleId}\` or \`status --gaps --module ${data.moduleId}\`).`);
+      } else {
+        lines.push(`note: 0 lines matched filter; module has ${s.totalLines} mapped line(s) (unexecuted=${s.unexecutedLines}, partial=${s.partialLines}, executed=${s.fullyExecutedLines}, not-loaded=${s.notLoadedLines}, unknown=${s.unknownLines}; module generated unexecuted=${fmtBytes(s.moduleGeneratedUnexecutedBytes)}).`);
+      }
     }
     return lines.join('\n');
   }
@@ -487,6 +523,7 @@ function fmtSource(data) {
   const width = Math.max(3, String(data.start.line + codeLines.length).length);
   const tagFor = cov => {
     if (!cov) return '-'.padEnd(13);
+    if (cov.runtimeState === 'executed' && cov.unexecutedBytes > 0) return `PART ${fmtBytes(cov.unexecutedBytes).padStart(7)} `.slice(0, 13);
     if (cov.runtimeState === 'executed') return `EXEC ${fmtBytes(cov.executedBytes).padStart(7)} `.slice(0, 13);
     if (cov.runtimeState === 'unexecuted') return `UNEX ${fmtBytes(cov.unexecutedBytes).padStart(7)} `.slice(0, 13);
     if (cov.runtimeState === 'not-loaded') return 'NOT-LOAD     ';
@@ -634,7 +671,7 @@ function fmtChain(data) {
     data.edges.forEach((edge, i) => {
       const m = edge.mapping;
       const locStr = m?.sourceLocation ? `${fmtLoc(m.sourceLocation)} [${fmtSpaceTag(m)}]`
-        : `raw ${typeof edge.rawLocation === 'string' ? edge.rawLocation : JSON.stringify(edge.rawLocation)}`;
+        : `raw ${typeof edge.rawLocation === 'string' ? edge.rawLocation : JSON.stringify(edge.rawLocation ?? null)}`;
       const cyc = cycleEdges.has(edge.edgeId) ? '  [CYCLE]' : '';
       const owner = m?.ownerChain ? `  owner: ${fmtOwners(m.ownerChain)}` : '';
       lines.push(`${i + 1}. [${edge.edgeId}] ${edge.originPath || edge.originModuleId} ${fmtExport(edge.originExport)} --(${locStr})--> ${edge.targetPath || edge.targetModuleId} ${fmtExport(edge.targetExport)}${owner}${cyc}`);

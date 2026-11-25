@@ -42,12 +42,12 @@ const COMMAND_SPECS = {
     usage: 'query.cjs chunks --db <index.sqlite> [--multi-origin] [--loaded] [--search <str>] | --group <id|name> [--section chunks|origins|candidates --offset <n>] | --chunk <id>',
     options: ['db', 'run', 'format', 'group', 'chunk', 'multi-origin', 'loaded', 'search', 'section', 'offset', 'limit', 'cursor', 'sort'],
     required: ['--db'],
-    sortFields: ['id', 'name (overview)', '...module sort fields (with --chunk)'],
+    sortFields: ['id', 'name', 'originCount', 'emittedBytes', 'unexecutedBytes (overview)', '...module sort fields (with --chunk)'],
     details: [
-      'Overview lists chunk groups; filter with --multi-origin, --loaded, or --search <substring>.',
+      'Overview lists chunk groups; filter with --multi-origin, --loaded (all chunks in group loaded), or --search <substring>.',
       '--group <id|name> inspects origins, execution status, and modules statically reachable only from unexecuted origins.',
       'For large groups, paginate one section with --group <id> --section chunks|origins|candidates --offset <n> --limit <m>.',
-      '--chunk <id> lists modules inside a chunk sorted by unexecuted bytes.',
+      '--chunk <id> lists modules inside a chunk sorted by unexecuted bytes (byte columns show cross-chunk module totals).',
     ],
     examples: [
       'query.cjs chunks --db index.sqlite --multi-origin --loaded',
@@ -97,7 +97,7 @@ const COMMAND_SPECS = {
     details: [
       'Automatically selects the best readable source for --module (prefers resource with coverage, then map-source, then post-loader).',
       'Pass --space post-loader to inspect loader-transformed JS (e.g., syntax downleveling).',
-      'Pass --unexecuted (or --state executed|unexecuted|not-loaded|unknown) to list mapped lines with inline code text.',
+      'Pass --unexecuted to list all mapped lines with unexecutedBytes > 0 (including partially executed lines), or --state executed|unexecuted|partial|not-loaded|unknown.',
       'Window reads default to 4000 UTF-16 chars (max 12000); resume with --line and --column.',
     ],
     examples: [

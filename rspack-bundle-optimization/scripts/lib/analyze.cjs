@@ -4,7 +4,8 @@ const { canonicalSource, sourcePathForContext, lineStarts, utf8Prefix, mergeRang
 
 function urlPath(value) { try { return decodeURIComponent(new URL(value, 'http://capture.local').pathname); } catch { return value.split(/[?#]/, 1)[0]; } }
 
-function computeAnalysis(args) {
+function computeAnalysis(args, hooks = {}) {
+  const progress = typeof hooks.onProgress === 'function' ? hooks.onProgress : () => {};
   const build = path.resolve(args.build); const recording = path.resolve(args.coverage);
   const inputs = [signature(build), signature(recording)];
   const raw = readJson(recording, 128 * 1024 * 1024); const envelope = Array.isArray(raw) ? null : raw;
@@ -39,6 +40,7 @@ function computeAnalysis(args) {
       for (const asset of assets) if (!matched.has(asset.id) && (urlPath(request.url) === urlPath(asset.url) || urlPath(request.url).endsWith(`/${asset.name}`))) networkOnly.add(asset.id);
     }
     for (const asset of assets) if (networkOnly.has(asset.id)) warnings.push({ asset: asset.name, kind: 'network-without-coverage', message: 'A script request was observed but its executed text/coverage was not captured. Load/execution attribution is unknown.' });
+    progress(`matched ${matched.size}/${assets.length} build assets (${networkOnly.size} network-without-coverage, ${ignored.length} ignored scripts)`);
     const modules = input.prepare('SELECT id,identifier,resource,resource_hash,layer FROM modules').all();
     const modulesById = new Map(modules.map(module => [module.id, module]));
     const memberships = new Map();
@@ -49,9 +51,13 @@ function computeAnalysis(args) {
     for (const m of modules) if (m.resource) {
       const key = canonicalSource(m.resource, metadata.context); if (!bySource.has(key)) bySource.set(key, []); bySource.get(key).push(m);
     }
-    const files = new Map(); const totals = byteMetrics(); const assetReports = [];
+    const files = new Map(); const totals = byteMetrics(); const observedTotals = byteMetrics();
+    let unknownAssets = 0; let unknownEmittedBytes = 0;
+    const assetReports = [];
     const readAsset = input.prepare('SELECT content,source_map,map_error FROM assets WHERE id=?');
-    for (const asset of assets) {
+    for (let assetIdx = 0; assetIdx < assets.length; assetIdx++) {
+      const asset = assets[assetIdx];
+      if (assetIdx > 0 && assetIdx % 200 === 0) progress(`analyzing sourcemaps ${assetIdx}/${assets.length} assets...`);
       const value = readAsset.get(asset.id); const generated = value.content; const prefix = utf8Prefix(generated);
       const loaded = networkOnly.has(asset.id) ? null : matched.has(asset.id); const ranges = matched.get(asset.id)?.ranges || []; const chunks = JSON.parse(asset.chunks);
       const assetMetrics = byteMetrics(); let rangeCursor = 0;
@@ -91,18 +97,40 @@ function computeAnalysis(args) {
         const { file, candidates } = source;
         addBytes(file.metrics, emitted, loadedBytes, executed);
         for (const module of candidates) file.moduleIds.add(module.id);
-        const line = file.lines.get(span.line) || { lineIndex: span.line, ...byteMetrics(), ranges: [], states: new Map(), ambiguous: new Set() };
+        let line = file.lines.get(span.line);
+        if (!line) {
+          line = { lineIndex: span.line, ...byteMetrics(), rangeCount: 0, states: new Map(), ambiguous: new Set() };
+          file.lines.set(span.line, line);
+        }
         addBytes(line, emitted, loadedBytes, executed);
-        line.ranges.push({ startColumn: span.column, endColumn: span.column + 1, executed: executed === null ? null : executed > 0 });
+        line.rangeCount++;
         if (candidates.length === 1) {
           const moduleId = candidates[0].id; const current = file.perModule.get(moduleId) || byteMetrics(); addBytes(current, emitted, loadedBytes, executed); file.perModule.set(moduleId, current);
           const evidence = line.states.get(moduleId) || byteMetrics(); addBytes(evidence, emitted, loadedBytes, executed); line.states.set(moduleId, evidence);
         } else for (const module of candidates) { file.ambiguous.add(module.id); line.ambiguous.add(module.id); }
-        file.lines.set(span.line, line);
       }
       addBytes(totals, assetMetrics.emittedBytes, assetMetrics.loadedBytes, assetMetrics.executedBytes); totals.mappedBytes += assetMetrics.mappedBytes; totals.unmappedBytes += assetMetrics.unmappedBytes;
+      if (loaded === null) {
+        unknownAssets++;
+        unknownEmittedBytes += assetMetrics.emittedBytes;
+      } else {
+        addBytes(observedTotals, assetMetrics.emittedBytes, assetMetrics.loadedBytes, assetMetrics.executedBytes);
+        observedTotals.mappedBytes += assetMetrics.mappedBytes;
+        observedTotals.unmappedBytes += assetMetrics.unmappedBytes;
+      }
       assetReports.push({ ...asset, chunks, loaded, metrics: assetMetrics });
     }
+    if (unknownAssets > 0) {
+      totals.observed = {
+        matchedAssets: matched.size,
+        unknownAssets,
+        unknownEmittedBytes,
+        loadedBytes: observedTotals.loadedBytes,
+        executedBytes: observedTotals.executedBytes,
+        unusedBytes: observedTotals.unusedBytes,
+      };
+    }
+    progress(`analyzed ${assets.length} assets -> ${files.size} mapped sources; computing retained source metrics...`);
     const retainedMetrics = (file, moduleId) => {
       if (file.content === null || file.ambiguous.has(moduleId)) return null;
       const starts = lineStarts(file.content); const prefix = utf8Prefix(file.content); const result = byteMetrics();
@@ -114,18 +142,31 @@ function computeAnalysis(args) {
       }
       return result;
     };
-    const fileRecords = [...files.values()].map(file => {
+    const fileRecords = [];
+    for (const file of files.values()) {
       const moduleIds = [...file.moduleIds]; const knownHash = file.contentHash;
       const verifiedOriginal = knownHash !== null && moduleIds.some(key => modulesById.get(key)?.resource_hash === knownHash);
-      const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => ({ lineIndex: line.lineIndex,
-        emittedBytes: line.emittedBytes, loadedBytes: line.loadedBytes, executedBytes: line.executedBytes, ranges: line.ranges,
-        moduleStates: Object.fromEntries(moduleIds.filter(key => !line.ambiguous.has(key)).map(key => [key, line.states.get(key) || byteMetrics()])) }));
-      return { id: file.id, path: file.path, coordinateSpace: verifiedOriginal ? 'resource' : 'map-source', content: file.content, moduleIds,
-        metrics: file.metrics,
-        generatedMetricsById: Object.fromEntries(moduleIds.map(key => [key, file.ambiguous.has(key) ? null : file.perModule.get(key) || byteMetrics()])),
-        moduleMetricsById: Object.fromEntries(moduleIds.map(key => [key, retainedMetrics(file, key)])),
-        mappedLines: lines };
-    });
+      const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => {
+        const moduleStates = moduleIds.length > 1
+          ? Object.fromEntries(moduleIds.filter(key => !line.ambiguous.has(key)).map(key => [key, line.states.get(key) || byteMetrics()]))
+          : (moduleIds.length === 1 && !line.ambiguous.has(moduleIds[0]) ? { [moduleIds[0]]: line.states.get(moduleIds[0]) || byteMetrics() } : {});
+        return {
+          lineIndex: line.lineIndex,
+          emittedBytes: line.emittedBytes, loadedBytes: line.loadedBytes, executedBytes: line.executedBytes,
+          rangeCount: line.rangeCount,
+          moduleStates,
+        };
+      });
+      const generatedMetricsById = Object.fromEntries(moduleIds.map(key => [key, file.ambiguous.has(key) ? null : file.perModule.get(key) || byteMetrics()]));
+      const moduleMetricsById = Object.fromEntries(moduleIds.map(key => [key, retainedMetrics(file, key)]));
+      // Release intermediate maps so GC can reclaim memory before SQLite indexing.
+      file.lines.clear(); file.perModule.clear(); file.ambiguous.clear();
+      fileRecords.push({
+        id: file.id, path: file.path, coordinateSpace: verifiedOriginal ? 'resource' : 'map-source', content: file.content, moduleIds,
+        metrics: file.metrics, generatedMetricsById, moduleMetricsById, mappedLines: lines,
+      });
+    }
+    files.clear();
     const recordingSha256 = hash(fs.readFileSync(recording));
     const coverageMeta = {
       kind: 'rspack-bundle-coverage', coverageSchema: 1, coverageSha256: recordingSha256,

@@ -105,6 +105,10 @@ function queryStatus(ctx) {
     ? ctx.db.prepare('SELECT g.*, m.display_path AS module_path FROM gaps g LEFT JOIN modules m ON m.id=g.module_id ORDER BY g.id LIMIT 10').all()
         .map(row => ({ gapId: row.id, moduleId: row.module_id, modulePath: row.module_path ?? null, kind: row.kind, detail: JSON.parse(row.detail) }))
     : null;
+  const gapKinds = ctx.meta.counts.gaps > 0
+    ? ctx.db.prepare('SELECT kind, count(*) AS count FROM gaps GROUP BY kind ORDER BY count DESC, kind ASC').all()
+        .map(row => ({ kind: row.kind, count: row.count }))
+    : [];
   return {
     mode: 'summary',
     compiler: ctx.meta.compiler, context: ctx.meta.context, scenario: ctx.meta.scenario,
@@ -119,6 +123,7 @@ function queryStatus(ctx) {
       scopeGaps: ctx.meta.coverageImportSummary.recordingGaps?.length || 0,
     } : null,
     inputs: ctx.meta.inputs.map(input => ({ path: input.path, bytes: Number(input.size) })),
+    ...(gapKinds.length ? { gapKinds } : {}),
     ...(gapsPreview ? { gapsPreview } : {}),
   };
 }
@@ -214,9 +219,9 @@ function querySource(ctx) {
     const module = moduleRow(ctx);
     if (!ctx.meta.coverageAvailable) fail('FEATURE_UNAVAILABLE', 'No coverage recording is indexed.');
     const currentScope = scope(ctx);
-    const state = ctx.args.state || (ctx.args.unexecuted ? 'unexecuted' : undefined);
-    if (state && !['executed', 'unexecuted', 'not-loaded', 'unknown'].includes(state))
-      fail('INVALID_ARGUMENT', '--state must be executed, unexecuted, not-loaded, or unknown.');
+    const state = ctx.args.state;
+    if (state && !['executed', 'unexecuted', 'partial', 'not-loaded', 'unknown'].includes(state))
+      fail('INVALID_ARGUMENT', '--state must be executed, unexecuted, partial, not-loaded, or unknown.');
     const where = ['l.module_id=?']; const params = [module.id];
     if (ctx.args.space !== undefined) {
       if (!['resource', 'map-source', 'post-loader'].includes(ctx.args.space))
@@ -229,8 +234,16 @@ function querySource(ctx) {
       where.push(`l.source_id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
     }
     if (currentScope === 'loaded') where.push('l.gl>0');
-    if (state) { where.push('l.state=?'); params.push(state); }
-    const defaultSort = ctx.args.unexecuted ? 'unexecutedBytes:desc' : 'line:asc';
+    if (state === 'partial') {
+      where.push('l.gx > 0 AND l.gu > 0');
+    } else if (state) {
+      where.push('l.state=?'); params.push(state);
+      if (ctx.args.unexecuted) where.push('l.gu > 0');
+    } else if (ctx.args.unexecuted) {
+      // Include both strict unexecuted lines (gx == 0) and partially executed lines (gx > 0 && gu > 0).
+      where.push('l.gu > 0');
+    }
+    const defaultSort = (ctx.args.unexecuted || state === 'partial') ? 'unexecutedBytes:desc' : 'line:asc';
     const session = sourceLib.createSession();
     const linesCache = new Map();
     const getLineText = (sourceId, lineNum) => {
@@ -248,24 +261,45 @@ function querySource(ctx) {
       return clean.length > 200 ? `${clean.slice(0, 200)}...` : clean;
     };
     try {
+      const page = paginate(ctx, {
+        from: 'FROM coverage_lines l JOIN sources s ON s.id=l.source_id', select: 'l.*', where: where.join(' AND '), params,
+        defaultSort,
+        sort: { id: 'l.id', line: 'l.line', generatedBytes: 'l.ge', unexecutedBytes: 'l.gu', 'coverage.generated.unexecutedBytes': 'l.gu' },
+        map: row => {
+          const parsedRanges = row.ranges ? JSON.parse(row.ranges) : null;
+          const sourceRangeCount = Array.isArray(parsedRanges) ? parsedRanges.length : (typeof parsedRanges === 'number' ? parsedRanges : null);
+          return {
+            lineId: row.id, sourceId: row.source_id, line: row.line, runtimeState: row.state,
+            partial: Boolean(row.gx > 0 && row.gu > 0),
+            generated: row.ge === null ? null : { emittedBytes: row.ge, loadedBytes: row.gl, executedBytes: row.gx, unexecutedBytes: row.gu },
+            code: getLineText(row.source_id, row.line),
+            sourceRangeCount, rangePrecision: row.range_precision,
+          };
+        },
+      });
+      let lineSummary = null;
+      if (page.page.total === 0) {
+        const stats = ctx.db.prepare(`
+          SELECT count(*) AS totalLines,
+            COALESCE(sum(CASE WHEN state = 'unexecuted' THEN 1 ELSE 0 END), 0) AS unexecutedLines,
+            COALESCE(sum(CASE WHEN gx > 0 AND gu > 0 THEN 1 ELSE 0 END), 0) AS partialLines,
+            COALESCE(sum(CASE WHEN state = 'executed' AND (gu IS NULL OR gu = 0) THEN 1 ELSE 0 END), 0) AS fullyExecutedLines,
+            COALESCE(sum(CASE WHEN state = 'not-loaded' THEN 1 ELSE 0 END), 0) AS notLoadedLines,
+            COALESCE(sum(CASE WHEN state = 'unknown' THEN 1 ELSE 0 END), 0) AS unknownLines
+          FROM coverage_lines WHERE module_id=?
+        `).get(module.id);
+        const modMetric = ctx.db.prepare('SELECT ge, gl, gx, gu FROM metrics WHERE module_id=? AND scope=?').get(module.id, currentScope);
+        lineSummary = { ...stats, moduleGeneratedUnexecutedBytes: modMetric?.gu ?? null };
+      }
       return {
         mode: 'lines',
         moduleId: module.id,
-        modulePath: module.display_path,
+        modulePath: displayPath(module.display_path, ctx.meta.context),
         scope: currentScope,
         granularity: 'source-line',
         population: 'mapped-lines-only',
-        ...paginate(ctx, {
-          from: 'FROM coverage_lines l JOIN sources s ON s.id=l.source_id', select: 'l.*', where: where.join(' AND '), params,
-          defaultSort,
-          sort: { id: 'l.id', line: 'l.line', generatedBytes: 'l.ge', unexecutedBytes: 'l.gu', 'coverage.generated.unexecutedBytes': 'l.gu' },
-          map: row => ({
-            lineId: row.id, sourceId: row.source_id, line: row.line, runtimeState: row.state,
-            generated: row.ge === null ? null : { emittedBytes: row.ge, loadedBytes: row.gl, executedBytes: row.gx, unexecutedBytes: row.gu },
-            code: getLineText(row.source_id, row.line),
-            sourceRangeCount: JSON.parse(row.ranges)?.length ?? null, rangePrecision: row.range_precision,
-          }),
-        }),
+        ...(lineSummary ? { lineSummary } : {}),
+        ...page,
       };
     } finally { session.close(); }
   }
@@ -409,6 +443,23 @@ function queryRefs(ctx) {
   } finally { session.close(); }
 }
 
+function chainEdgeItem(row, context = null) {
+  const rawLocation = JSON.parse(row.raw_loc);
+  const sourceLocation = JSON.parse(row.source_loc);
+  return {
+    edgeId: row.id,
+    originModuleId: row.origin,
+    originPath: displayPath(row.origin_path ?? null, context),
+    targetModuleId: row.target,
+    targetPath: displayPath(row.target_path ?? null, context),
+    originExport: JSON.parse(row.origin_export),
+    targetExport: JSON.parse(row.target_export),
+    ...(rawLocation !== null ? { rawLocation } : {}),
+    ...(row.source_path ? { sourcePath: row.source_path } : {}),
+    ...(sourceLocation !== null ? { sourceLocation } : {}),
+  };
+}
+
 function queryChain(ctx) {
   checkRun(ctx);
   const root = moduleRow(ctx);
@@ -437,7 +488,7 @@ function queryChain(ctx) {
         from: 'FROM edges e LEFT JOIN modules mo ON mo.id=e.origin LEFT JOIN modules mt ON mt.id=e.target',
         select: 'e.*, mo.display_path AS origin_path, mt.display_path AS target_path',
         where: filter.where, params: filter.params, sort: { id: 'e.id' },
-        map: row => { rawEdgeRows.set(row.id, row); return edgeItem(row, null, ctx.meta.context); },
+        map: row => { rawEdgeRows.set(row.id, row); return chainEdgeItem(row, ctx.meta.context); },
       });
       for (const edge of page.items) {
         if (!ids.has(edge.edgeId)) { ids.add(edge.edgeId); edges.push(edge); }
@@ -503,13 +554,13 @@ function queryChain(ctx) {
 
   if (result.edges.length <= 25) {
     const enriched = attachSnippets(result, wantCode);
-    if (Buffer.byteLength(json(enriched)) <= 26 * 1024) return enriched;
+    if (Buffer.byteLength(json(enriched)) <= 28 * 1024) return enriched;
     if (wantCode) {
       const noCode = attachSnippets(result, false);
-      if (Buffer.byteLength(json(noCode)) <= 26 * 1024) return noCode;
+      if (Buffer.byteLength(json(noCode)) <= 28 * 1024) return noCode;
     }
   }
-  while (Buffer.byteLength(json(result)) > 24 * 1024 && budget > 1) {
+  while (Buffer.byteLength(json(result)) > 28 * 1024 && budget > 1) {
     budget = Math.max(1, Math.floor(budget / 2));
     result = runBfs(budget);
   }
@@ -559,10 +610,10 @@ function queryChunks(ctx) {
         from: 'FROM module_chunks mc JOIN modules m ON m.id=mc.module_id JOIN metrics c ON c.module_id=m.id',
         where: "mc.chunk_id=? AND c.scope='build'",
         params: [chunk.id],
-        select: 'm.*,c.ge,c.gl,c.gx,c.gu,c.gr,c.se,c.sl,c.sx,c.su,c.sr',
+        select: 'm.*,c.ge,c.gl,c.gx,c.gu,c.gr,c.se,c.sl,c.sx,c.su,c.sr,(SELECT count(*) FROM module_chunks mc2 WHERE mc2.module_id=m.id) AS chunk_count',
         defaultSort,
         sort: MODULE_SORT,
-        map: row => ({ ...compactModule(row, ctx.meta.context), coverage: { generated: metrics(row, 'g') }, usage: usageSummary(row) }),
+        map: row => ({ ...compactModule(row, ctx.meta.context), chunkCount: row.chunk_count, coverage: { generated: metrics(row, 'g') }, usage: usageSummary(row) }),
       }),
     };
   }
@@ -681,11 +732,15 @@ function queryChunks(ctx) {
     const allOrigins = origins.map(({ _reachable, ...rest }) => rest);
     const allCandidates = unnecessaryCandidates.map(toCandidate);
 
+    const loadedChunksCount = chunks.filter(c => c.loaded === true).length;
+    const unknownChunksCount = chunks.filter(c => c.loaded === null).length;
     const groupMeta = {
       groupId: group.id, name: group.name, parents,
       multiOrigin: origins.length > 1,
       totalModules: groupModRows.length,
       chunksTotal: chunks.length,
+      loadedChunks: ctx.meta.coverageAvailable ? loadedChunksCount : null,
+      unknownChunks: ctx.meta.coverageAvailable ? unknownChunksCount : null,
       originsTotal: allOrigins.length,
     };
     const analysisBase = {
@@ -728,12 +783,20 @@ function queryChunks(ctx) {
   if (ctx.args['multi-origin']) where.push('json_array_length(cg.origins) > 1');
   if (ctx.args.loaded) {
     if (!ctx.meta.coverageAvailable) fail('METRIC_UNAVAILABLE', '--loaded requires a coverage input.');
-    where.push('EXISTS (SELECT 1 FROM json_each(cg.chunks) jc JOIN chunks ch ON ch.id=jc.value WHERE ch.loaded=1)');
+    // Require ALL chunks in the group to be loaded so unloaded async groups sharing a loaded common chunk do not false-positive.
+    where.push('json_array_length(cg.chunks) > 0 AND NOT EXISTS (SELECT 1 FROM json_each(cg.chunks) jc LEFT JOIN chunks ch ON ch.id=jc.value WHERE ch.loaded IS NULL OR ch.loaded != 1)');
   }
   if (ctx.args.search) {
     where.push("(instr(COALESCE(cg.name,''),?)>0 OR instr(cg.id,?)>0 OR instr(cg.origins,?)>0)");
     params.push(ctx.args.search, ctx.args.search, ctx.args.search);
   }
+  const chunkGroupSort = {
+    id: 'cg.id',
+    name: 'cg.name',
+    originCount: 'json_array_length(cg.origins)',
+    emittedBytes: '(SELECT CASE WHEN count(*)=0 OR sum(CASE WHEN ch.emitted_bytes IS NULL THEN 1 ELSE 0 END)>0 THEN NULL ELSE sum(ch.emitted_bytes) END FROM json_each(cg.chunks) jc JOIN chunks ch ON ch.id=jc.value)',
+    unexecutedBytes: '(SELECT CASE WHEN count(*)=0 OR sum(CASE WHEN ch.unexecuted_bytes IS NULL THEN 1 ELSE 0 END)>0 THEN NULL ELSE sum(ch.unexecuted_bytes) END FROM json_each(cg.chunks) jc JOIN chunks ch ON ch.id=jc.value)',
+  };
   const groupsPage = paginate(ctx, {
     command: 'chunks',
     defaultLimit: 20,
@@ -741,7 +804,7 @@ function queryChunks(ctx) {
     from: 'FROM chunk_groups cg',
     select: 'cg.*',
     where: where.join(' AND ') || '1', params,
-    sort: { id: 'cg.id', name: 'cg.name' },
+    sort: chunkGroupSort,
     map: row => {
       const chunkIds = JSON.parse(row.chunks);
       const originsRaw = JSON.parse(row.origins);
@@ -752,9 +815,15 @@ function queryChunks(ctx) {
       const modCount = chunkIds.length
         ? ctx.db.prepare(`SELECT count(DISTINCT module_id) AS n FROM module_chunks WHERE chunk_id IN (${chunkIds.map(() => '?').join(',')})`).get(...chunkIds).n
         : 0;
-      const loaded = chunkRows.length
-        ? (chunkRows.some(c => c.loaded === 1) ? true : chunkRows.some(c => c.loaded === null) ? null : false)
-        : null;
+      const totalChunks = chunkRows.length;
+      const loadedChunks = chunkRows.filter(c => c.loaded === 1).length;
+      const unloadedChunks = chunkRows.filter(c => c.loaded === 0).length;
+      const unknownChunks = chunkRows.filter(c => c.loaded === null).length;
+      const loadState = !totalChunks ? 'unknown'
+        : loadedChunks === totalChunks ? 'loaded'
+        : unloadedChunks > 0 ? (loadedChunks > 0 ? 'shared-only' : 'not-loaded')
+        : (loadedChunks > 0 ? 'partial-unknown' : 'unknown');
+      const loaded = loadState === 'loaded' ? true : (loadState === 'not-loaded' || loadState === 'shared-only') ? false : null;
       const emittedSum = chunkRows.length && chunkRows.every(c => c.emitted_bytes !== null)
         ? chunkRows.reduce((s, c) => s + c.emitted_bytes, 0) : null;
       const unexecSum = chunkRows.length && chunkRows.every(c => c.unexecuted_bytes !== null)
@@ -764,6 +833,10 @@ function queryChunks(ctx) {
         files: chunkRows.flatMap(c => JSON.parse(c.files)),
         initial: chunkRows.some(c => c.initial === 1),
         loaded,
+        loadState,
+        loadedChunks,
+        totalChunks,
+        unknownChunks,
         moduleCount: modCount,
         emittedBytes: emittedSum,
         unexecutedBytes: unexecSum,

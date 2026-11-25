@@ -61,13 +61,13 @@ node <skill>/scripts/query.cjs status --db <index.sqlite> --gaps [--module <id>]
 
 ### 2. 查 Chunk Groups 与多 origin 合并（`chunks`）
 ```sh
-# 一步筛选已加载的多 origin 合并 chunk group（支持 --multi-origin / --loaded / --search）
-node <skill>/scripts/query.cjs chunks --db <index.sqlite> --multi-origin --loaded
+# 一步筛选已完整加载的多 origin 合并 chunk group（支持 --multi-origin / --loaded / --search / --sort）
+node <skill>/scripts/query.cjs chunks --db <index.sqlite> --multi-origin --loaded --sort unexecutedBytes:desc
 # 下钻分析指定 chunk group（检查已执行 vs 未执行 origin 静态可达模块）：
 node <skill>/scripts/query.cjs chunks --db <index.sqlite> --group <groupId-or-name>
 # 大型 chunk group 分段翻页查看 origins / chunks / candidates：
 node <skill>/scripts/query.cjs chunks --db <index.sqlite> --group <groupId> --section origins --offset 20 --limit 20
-# 查看单个 chunk 内的模块列表：
+# 查看单个 chunk 内的模块列表（字节列为跨 chunk 模块汇总，chunks 列标明所属 chunk 数）：
 node <skill>/scripts/query.cjs chunks --db <index.sqlite> --chunk <chunkId>
 ```
 
@@ -109,7 +109,7 @@ node <skill>/scripts/query.cjs module --db <index.sqlite> --module <module-id> -
 # 直接读源码（自动选最优 resource/map-source，自带行号和每行覆盖率标注）
 node <skill>/scripts/query.cjs source --db <index.sqlite> --module <module-id> --line 1
 
-# 按未执行字节降序列出热点行及对应行代码
+# 按未执行字节降序列出热点行及对应行代码（包含未执行行和部分执行行 `partial`；严格 0 执行行可用 `--state unexecuted`）
 node <skill>/scripts/query.cjs source --db <index.sqlite> --module <module-id> --unexecuted --limit 20
 
 # 排查语法降级时查看 loader 转换后产物

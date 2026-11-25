@@ -409,31 +409,66 @@ test('production scale fixes: displayPath strips loader chains and shortens mono
 test('chunks supports --multi-origin, --search, --loaded and --group --section/--offset without exceeding 32 KiB on large groups', t => {
   const { DatabaseSync } = require('node:sqlite');
   const f = fixture(t);
-  const modules = Array.from({ length: 85 }, (_, i) => module_(i));
-  const covFile = coverage(path.join(f.dir, 'coverage'), modules);
+  const modules = Array.from({ length: 85 }, (_, i) => i === 84 ? module_(i, { chunks: ['lazy'] }) : module_(i));
+  const files = modules.map(m => ({
+    id: `f-${m.id}`, path: m.resource, moduleIds: [m.id], content: m.content,
+    metrics: m.id === '84' ? metrics(100, 0, 0) : metrics(100, 100, 20),
+    lines: [{ lineIndex: 0, emittedBytes: 100, loadedBytes: m.id === '84' ? 0 : 100, executedBytes: m.id === '84' ? 0 : 20, ranges: [] }],
+  }));
+  const covFile = coverage(path.join(f.dir, 'coverage'), modules, { files });
   const db = new DatabaseSync(covFile);
   db.exec('CREATE TABLE chunk_groups(id TEXT PRIMARY KEY,chunks TEXT,origins TEXT,parents TEXT,name TEXT);');
   const manyOrigins = Array.from({ length: 80 }, (_, i) => ({ moduleId: String(i), request: `./feature-${i}-${'x'.repeat(40)}`, location: null }));
   db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('0', '["main"]', JSON.stringify(manyOrigins), '[]', 'huge-shared');
-  db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('1', '["lazy"]', JSON.stringify([{ moduleId: '0', request: './lazy-only', location: null }]), '["0"]', 'single-lazy');
+  db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('1', '["lazy"]', JSON.stringify([{ moduleId: '84', request: './lazy-only', location: null }]), '["0"]', 'single-lazy');
+  // Group sharing a loaded common chunk ("main") while its own chunk ("lazy") is NOT loaded must NOT match --loaded!
+  db.prepare('INSERT INTO chunk_groups VALUES (?,?,?,?,?)').run('2', '["main","lazy"]', JSON.stringify([{ moduleId: '0', request: './shared-a', location: null }, { moduleId: '1', request: './shared-b', location: null }]), '["0"]', 'unloaded-with-shared');
+  // Put module 0 into both "main" and "lazy" chunks to verify chunkCount > 1 reporting in chunks --chunk.
+  db.prepare('INSERT OR IGNORE INTO module_chunks VALUES (?,?)').run('0', 'lazy');
   db.close();
   f.index({ coverage: covFile });
 
   const multi = f.query('chunks', { 'multi-origin': true });
-  assert.equal(multi.items.length, 1); assert.equal(multi.items[0].name, 'huge-shared');
+  assert.equal(multi.items.length, 2);
   assert.equal(multi.chunks.items.length, 0, 'Overview with chunk groups should not spam standalone chunk list.');
+  const sharedGroup = multi.items.find(g => g.name === 'unloaded-with-shared');
+  assert.equal(sharedGroup.loaded, false);
+  assert.equal(sharedGroup.loadState, 'shared-only');
+  assert.equal(sharedGroup.loadedChunks, 1);
+  assert.equal(sharedGroup.totalChunks, 2);
+  assert.ok(formatText('chunks', multi).includes('shared (1/2)'));
+
   const loadedOnly = f.query('chunks', { loaded: true });
   assert.equal(loadedOnly.items.length, 1); assert.equal(loadedOnly.items[0].name, 'huge-shared');
+  assert.equal(loadedOnly.items[0].loadState, 'loaded');
+  assert.ok(formatText('chunks', loadedOnly).includes('yes (1/1)'));
+
+  const byOrigins = f.query('chunks', { sort: 'originCount:desc' });
+  assert.equal(byOrigins.items[0].name, 'huge-shared');
+  assert.equal(byOrigins.items[1].name, 'unloaded-with-shared');
+
   const searched = f.query('chunks', { search: 'single-lazy' });
   assert.equal(searched.items.length, 1); assert.equal(searched.items[0].groupId, '1');
+
+  const chunkDetail = f.query('chunks', { chunk: 'main', sort: 'path:asc', limit: 5 });
+  const mod0 = chunkDetail.items.find(m => m.path === 'src/0.js');
+  assert.equal(mod0.chunkCount, 2);
+  const chunkText = formatText('chunks', chunkDetail);
+  assert.ok(chunkText.includes('cross-chunk module totals'));
 
   // Huge 80-origin group fits safely under 32 KiB and paginates origins via --section/--offset
   const groupDetail = f.query('chunks', { group: 'huge-shared' });
   assert.ok(Buffer.byteLength(JSON.stringify(groupDetail)) <= 32768);
   assert.equal(groupDetail.group.originsTotal, 80);
+  assert.equal(groupDetail.group.loadedChunks, 1);
   assert.ok(groupDetail.origins.length < 80);
   const groupText = formatText('chunks', groupDetail);
   assert.ok(groupText.includes('--section origins --offset'));
+  assert.ok(groupText.includes('chunks: 1/1 loaded'));
+
+  // Unloaded group with 0 executed origins gives explicit baseline explanation
+  const unloadedDetail = f.query('chunks', { group: 'single-lazy' });
+  assert.ok(formatText('chunks', unloadedDetail).includes('no executed origin baseline'));
 
   const page1 = f.query('chunks', { group: 'huge-shared', section: 'origins', offset: 0, limit: 15 });
   assert.equal(page1.section, 'origins');
