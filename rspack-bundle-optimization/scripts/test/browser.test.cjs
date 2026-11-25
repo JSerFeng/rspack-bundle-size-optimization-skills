@@ -82,7 +82,7 @@ test('paint comparison uses each median and prioritizes either regression', () =
   assert.equal(comparePaint(medians, { fcpMs: 90, lcpMs: 2005 }).status, 'improved');
 });
 
-test('validate measures page variants and rejects a real Chrome paint regression', { skip: !chrome, timeout: 30000 }, async t => {
+test('scan measures page variants and rejects a real Chrome paint regression', { skip: !chrome, timeout: 30000 }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rspack-paint-real-'));
   let renderDelay = 0;
   let mainRequests = 0;
@@ -106,7 +106,7 @@ test('validate measures page variants and rejects a real Chrome paint regression
   const baseline = path.join(dir, 'before.json');
   const candidate = path.join(dir, 'after.json');
   const command = (...flags) => run(process.execPath, [
-    path.join(__dirname, '../validate.cjs'), '--endpoint', endpoint, '--url', `${url}#route`,
+    path.join(__dirname, '../scan.cjs'), '--endpoint', endpoint, '--url', `${url}#route`,
     '--ready-selector', '#ready', '--settle-ms', '100', ...flags,
   ]);
   const before = JSON.parse((await command('--out', baseline)).stdout);

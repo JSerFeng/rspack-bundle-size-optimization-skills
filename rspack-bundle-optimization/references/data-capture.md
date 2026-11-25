@@ -68,11 +68,11 @@ precise coverage 会影响 V8 的优化执行，首屏计时使用独立的验�
 用同一个 Chrome 标签页和 URL 分别访问原生产构建与候选构建。先验证 URL 实际加载了对应构建。沿用上面的 endpoint、target 和就绪条件。就绪信号应能确认目标内容已渲染，例如真实列表行或页面主内容。
 
 ```bash
-node <skill>/scripts/validate.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
+node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
   --ready-selector '[data-first-screen-ready]' --out before.json
 
 # 用相同生产配置重建并在同一 URL 提供候选构建，再复测。
-node <skill>/scripts/validate.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
+node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
   --ready-selector '[data-first-screen-ready]' --against before.json --out after.json
 ```
 

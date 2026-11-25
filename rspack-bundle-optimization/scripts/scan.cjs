@@ -30,7 +30,7 @@ function requireComparable(baseline, candidate) {
     fail('INCOMPARABLE_RUNS', 'Measure both builds with the same page and browser conditions.', { different });
 }
 
-async function validate(args) {
+async function scan(args) {
   for (const name of ['endpoint', 'url', 'out']) {
     if (!args[name]) fail('INVALID_ARGUMENT', `--${name} is required.`);
   }
@@ -62,7 +62,7 @@ async function validate(args) {
     const saved = readJson(file, 1024 * 1024);
     if (saved?.kind !== kind || saved.schemaVersion !== schemaVersion || saved.status !== 'complete' ||
         !saved.conditions || typeof saved.conditions !== 'object')
-      fail('INVALID_BASELINE', 'Expected a complete paint report written by validate.cjs.');
+      fail('INVALID_BASELINE', 'Expected a complete paint report written by scan.cjs.');
     baseline = { file, conditions: saved.conditions, medians: summarizePaint(saved.samples) };
     requireComparable(baseline.conditions, settings);
   }
@@ -86,10 +86,10 @@ async function main(argv = process.argv.slice(2)) {
   catch (error) { fail('INVALID_ARGUMENT', error.message); }
   if (args.help) return {
     ok: true,
-    usage: 'node <skill>/scripts/validate.cjs --endpoint <Chrome-debugging-HTTP-URL-or-page-WebSocket> --url <URL> --ready-selector <selector> --out <report.json> [--against <baseline.json>]',
+    usage: 'node <skill>/scripts/scan.cjs --endpoint <Chrome-debugging-HTTP-URL-or-page-WebSocket> --url <URL> --ready-selector <selector> --out <report.json> [--against <baseline.json>]',
     options: ['target', 'ready-expression', 'runs 3..30', 'timeout ms', 'settle-ms ms', 'cache cold|warm', 'throttle none|mobile'],
   };
-  return validate(args);
+  return scan(args);
 }
 
 if (require.main === module) main().then(result => {

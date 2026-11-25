@@ -14,7 +14,7 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 
 设法访问到项目中的 Rspack 配置，让 Rspack 可以在生产环境的条件下启动起来（主要是 providedExports, usedExports, innerGraph 一定需要开启才能分析 export），但需要关闭 concatenateModules 配置，因为他会妨碍后续对 export usage 的分析，可以关闭其他对产物无关的插件来验证，然后设法启动首屏，等待首屏的稳定，确保页面加载完成。
 
-改动可能影响首屏加载时，先在原生产构建上用 `scripts/validate.cjs` 保存 FCP/LCP 基线。改动后用相同生产配置重建，在同一页面和就绪条件下用 `--against` 复测。计时与 coverage 独立进行。若页面或基线不可用，仍可报告体积与归因结果，并说明首屏计时未验证。见[首屏计时验证](references/data-capture.md#首屏计时验证)。
+改动可能影响首屏加载时，先在原生产构建上用 `scripts/scan.cjs` 保存 FCP/LCP 基线。改动后用相同生产配置重建，在同一页面和就绪条件下用 `--against` 复测。计时与 coverage 独立进行。若页面或基线不可用，仍可报告体积与归因结果，并说明首屏计时未验证。见[首屏计时验证](references/data-capture.md#首屏计时验证)。
 
 ## 检查 Chunk 是否包含非必要 Module
 
