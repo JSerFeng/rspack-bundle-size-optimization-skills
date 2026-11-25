@@ -2,13 +2,14 @@
 const { parseArgs } = require('node:util');
 const { fs, path, fail, json, integer } = require('./lib/common.cjs');
 const { CDP, targetSocket } = require('./lib/cdp.cjs');
+const { firstScreenBoundary, readinessJs, navigate, isNavigationTransition } = require('./lib/page.cjs');
 
 async function record(args) {
   for (const name of ['endpoint', 'url', 'out']) if (!args[name]) fail('INVALID_ARGUMENT', `--${name} is required.`);
-  if (Boolean(args['ready-selector']) === Boolean(args['ready-expression'])) fail('INVALID_ARGUMENT', 'Specify exactly one --ready-selector or --ready-expression to define the first-screen boundary.');
+  const boundary = firstScreenBoundary(args);
   const destination = path.resolve(args.out);
   if (fs.existsSync(destination)) fail('OUTPUT_EXISTS', 'Recording output already exists.');
-  const timeout = integer(args.timeout, 30000, 300000, 1); const expression = args['ready-expression'] || `document.querySelector(${json(args['ready-selector'])}) !== null`;
+  const timeout = integer(args.timeout, 30000, 300000, 1); const expression = readinessJs(boundary);
   if (args.cache !== undefined && !['cold', 'warm'].includes(args.cache)) fail('INVALID_ARGUMENT', '--cache must be cold or warm.');
   const cache = args.cache || 'cold'; const cdp = await CDP.connect(await targetSocket(args.endpoint, args.target));
   const network = new Map(); const scripts = new Map(); const gaps = [];
@@ -26,21 +27,17 @@ async function record(args) {
     await cdp.send('Page.enable'); await cdp.send('Network.enable'); await cdp.send('Debugger.enable'); await cdp.send('Profiler.enable');
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: cache === 'cold' });
     await cdp.send('Profiler.startPreciseCoverage', { detailed: true, callCount: true, allowTriggeredUpdates: false }); started = true;
-    const previous = await cdp.send('Page.getFrameTree');
-    const navigation = await cdp.send('Page.navigate', { url: args.url });
-    if (navigation.errorText) fail('NAVIGATION_FAILED', navigation.errorText);
-    if (!navigation.loaderId || navigation.loaderId === previous.frameTree.frame.loaderId)
-      await cdp.send('Page.reload', { ignoreCache: cache === 'cold' });
+    const previous = await navigate(cdp, args.url, cache);
     const deadline = Date.now() + timeout;
     while (true) {
       try {
         const tree = await cdp.send('Page.getFrameTree'); const frame = tree.frameTree.frame;
-        if (frame.loaderId !== previous.frameTree.frame.loaderId) {
+        if (frame.loaderId !== previous) {
           const state = await cdp.send('Runtime.evaluate', { expression: `Boolean(${expression})`, returnByValue: true, awaitPromise: true });
           if (state.exceptionDetails) fail('READINESS_FAILED', state.exceptionDetails.exception?.description || state.exceptionDetails.text || 'Readiness expression failed.');
           if (state.result?.value === true) break;
         }
-      } catch (error) { if (error.code !== 'CDP_ERROR' || !/context|navigat/i.test(error.message)) throw error; }
+      } catch (error) { if (!isNavigationTransition(error)) throw error; }
       if (Date.now() >= deadline) fail('RECORDING_TIMEOUT', 'First-screen readiness condition was not reached; no complete recording was written.');
       await new Promise(resolve => setTimeout(resolve, 50));
     }
