@@ -82,6 +82,10 @@ node <skill>/scripts/query.cjs modules --db <index.sqlite> --scope loaded \
 node <skill>/scripts/query.cjs modules --db <index.sqlite> --scope loaded \
   --used-state none --sort coverage.generated.unexecutedBytes:desc
 
+# 大规模模块列表可用 --fields 精简列，显著减少单页体积和翻页次数
+node <skill>/scripts/query.cjs modules --db <index.sqlite> --scope loaded \
+  --max-ratio 0.2 --fields path,coverage.generated.unexecutedBytes,coverage.generated.executionRatio --limit 100
+
 # 按直接消费者影响面排序（不依赖浏览器录制）
 node <skill>/scripts/query.cjs modules --db <index.sqlite> \
   --sort usage.distinctConsumers:desc --limit 20

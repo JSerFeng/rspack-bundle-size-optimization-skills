@@ -66,18 +66,25 @@ async function scan(args) {
     baseline = { file, conditions: saved.conditions, medians: summarizePaint(saved.samples) };
     requireComparable(baseline.conditions, settings);
   }
-  const { conditions, samples } = await measurePaint({ ...settings, endpoint: args.endpoint, target: args.target, runs });
+  const { conditions, samples } = await measurePaint({
+    ...settings, endpoint: args.endpoint, target: args.target, runs,
+    onProgress: msg => process.stderr.write(`[scan] ${msg}\n`),
+  });
   if (baseline) requireComparable(baseline.conditions, conditions);
   const medians = summarizePaint(samples);
+  const diagnostics = {
+    failedAssets: samples.reduce((sum, s) => sum + (s.diagnostics?.failedAssets || 0), 0),
+    pageErrors: samples.reduce((sum, s) => sum + (s.diagnostics?.pageErrors || 0), 0),
+  };
   const comparison = baseline && { baseline: baseline.file, ...comparePaint(baseline.medians, medians) };
-  const report = { schemaVersion, kind, status: 'complete', conditions, samples, medians, comparison: comparison ?? null };
+  const report = { schemaVersion, kind, status: 'complete', conditions, samples, medians, diagnostics, comparison: comparison ?? null };
 
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const pending = `${destination}.${randomUUID()}.incomplete`;
   fs.writeFileSync(pending, json(report), { flag: 'wx' });
   try { fs.linkSync(pending, destination); }
   finally { fs.unlinkSync(pending); }
-  return { ok: true, schemaVersion, report: destination, runs, medians, comparison: comparison ?? null };
+  return { ok: true, schemaVersion, report: destination, runs, medians, diagnostics, comparison: comparison ?? null };
 }
 
 async function main(argv = process.argv.slice(2)) {

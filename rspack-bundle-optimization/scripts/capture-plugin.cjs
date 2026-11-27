@@ -30,7 +30,8 @@ class BundleEvidencePlugin {
       const db = createCapture(pending, { context: fs.realpathSync(compiler.context), compiler: compiler.name || compiler.options.name || null,
         rspackVersion: compiler.webpack.rspackVersion || null, run, columnBase: 1, locationSpace: this.options.locationSpace || 'post-loader',
         optimization: Object.fromEntries(['usedExports', 'innerGraph', 'sideEffects', 'concatenateModules', 'minimize'].map(key => [key, compiler.options.optimization?.[key] ?? null])) });
-      const state = { db, pending, final, closed: false }; captures.set(compilation, state); active = state;
+      const state = { db, pending, final, closed: false, large: false }; captures.set(compilation, state); active = state;
+      const stageLog = msg => { if (state.large) process.stderr.write(`[${NAME}] ${msg}\n`); };
       const visit = (module, parent, seen, captureText) => {
         if (seen.has(module)) return ensureModule(db, module.identifier(), module.layer);
         seen.add(module); const key = ensureModule(db, module.identifier(), module.layer);
@@ -49,12 +50,16 @@ class BundleEvidencePlugin {
         return key;
       };
       compilation.hooks.finishModules.tap(NAME, modules => {
+        if (modules.size >= 500) state.large = true;
+        stageLog(`capturing ${modules.size} module sources...`);
         db.exec('BEGIN');
         try { const seen = new Set(); for (const module of modules) visit(module, null, seen, true); db.exec('COMMIT'); }
         catch (error) { db.exec('ROLLBACK'); throw error; }
+        stageLog(`captured ${modules.size} modules`);
       });
       if (Native?.getCompilationHooks) Native.getCompilationHooks(compilation).moduleGraph.tapPromise(NAME, async payload => {
         if (state.closed || !Array.isArray(payload.exportUsageEdges)) return;
+        stageLog(`writing ${payload.exportUsageEdges.length} native export usage edges...`);
         db.exec('BEGIN');
         try {
           const lookup = new Map(); let discarded = 0;
@@ -83,8 +88,9 @@ class BundleEvidencePlugin {
         db.exec('BEGIN');
         try {
           const assets = compilation.getAssets(); const byName = new Map(assets.map(asset => [asset.name, asset]));
-          for (const asset of assets) {
-            if (!/\.(?:js|mjs|cjs)$/i.test(asset.name)) continue;
+          const jsAssets = assets.filter(asset => /\.(?:js|mjs|cjs)$/i.test(asset.name));
+          stageLog(`capturing ${jsAssets.length} JS assets and sourcemaps...`);
+          for (const asset of jsAssets) {
             const written = readWritten(asset.name);
             const generated = text(written ?? safely(() => asset.source?.source()));
             if (generated === null) {

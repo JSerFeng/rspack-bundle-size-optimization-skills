@@ -502,22 +502,26 @@ function queryChain(ctx) {
       }
       if (page.page.nextCursor) frontier.push({ ...state, reason: 'page-budget', query: { command: 'refs', ...args, cursor: page.page.nextCursor } });
     }
-    const involvedIds = [
+    // Prioritize page-budget frontier entries (cursor continuations) before query-budget items, and cap frontier/terminals so wide-fanout chains retain more edges within the 28 KiB budget.
+    const orderedFrontier = [...frontier].sort((a, b) => (a.reason === 'page-budget' ? 0 : 1) - (b.reason === 'page-budget' ? 0 : 1));
+    const involvedForPaths = [
       root.id,
       ...edges.flatMap(e => [e.originModuleId, e.targetModuleId]),
       ...terminals.map(t => t.moduleId),
       ...cycles.map(c => c.moduleId),
-      ...frontier.map(f => f.moduleId),
+      ...orderedFrontier.slice(0, 30).map(f => f.moduleId),
     ];
-    const paths = modulePathMap(ctx, involvedIds);
-    const uniqueModIds = [...paths.keys()];
-    const modStats = uniqueModIds.length
+    const paths = modulePathMap(ctx, involvedForPaths);
+    const frontierMapped = budgetItems(orderedFrontier.map(f => ({ ...f, path: paths.get(f.moduleId) ?? null })), 4 * 1024, 25);
+    const terminalsMapped = budgetItems(terminals.map(t => ({ ...t, path: paths.get(t.moduleId) ?? null })), 4 * 1024, 40);
+    const edgeModIds = [...new Set([root.id, ...edges.flatMap(e => [e.originModuleId, e.targetModuleId])])];
+    const modStats = edgeModIds.length
       ? ctx.db.prepare(`
           SELECT m.id, m.display_path, m.loaded, c.gu, c.gr
           FROM modules m LEFT JOIN metrics c ON c.module_id=m.id AND c.scope='build'
-          WHERE m.id IN (${uniqueModIds.map(() => '?').join(',')})
+          WHERE m.id IN (${edgeModIds.map(() => '?').join(',')})
           ORDER BY m.id
-        `).all(...uniqueModIds).map(r => ({
+        `).all(...edgeModIds).map(r => ({
           moduleId: r.id, path: displayPath(r.display_path, ctx.meta.context),
           loaded: r.loaded === null ? null : Boolean(r.loaded),
           unexecutedBytes: r.gu ?? null, executionRatio: r.gr ?? null,
@@ -527,9 +531,11 @@ function queryChain(ctx) {
       root: { moduleId: root.id, path: displayPath(root.display_path, ctx.meta.context), exportPath: names },
       coverageAvailable: ctx.meta.coverageAvailable,
       edges,
-      terminals: terminals.map(t => ({ ...t, path: paths.get(t.moduleId) ?? null })),
+      terminals: terminalsMapped,
+      ...(terminals.length > terminalsMapped.length ? { terminalsTotal: terminals.length } : {}),
       cycles: cycles.map(c => ({ ...c, path: paths.get(c.moduleId) ?? null })),
-      frontier: frontier.map(f => ({ ...f, path: paths.get(f.moduleId) ?? null })),
+      frontier: frontierMapped,
+      ...(frontier.length > frontierMapped.length ? { frontierTotal: frontier.length } : {}),
       modules: modStats,
       truncated: frontier.length > 0, maxDepth, maxEdges: budget,
     };
@@ -560,9 +566,21 @@ function queryChain(ctx) {
       if (Buffer.byteLength(json(noCode)) <= 28 * 1024) return noCode;
     }
   }
-  while (Buffer.byteLength(json(result)) > 28 * 1024 && budget > 1) {
-    budget = Math.max(1, Math.floor(budget / 2));
-    result = runBfs(budget);
+  if (Buffer.byteLength(json(result)) > 28 * 1024 && budget > 1) {
+    let lo = 1;
+    let hi = Math.max(1, Math.min(budget, result.edges.length) - 1);
+    let best = null;
+    while (lo <= hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const candidate = runBfs(mid);
+      if (Buffer.byteLength(json(candidate)) <= 28 * 1024) {
+        best = candidate;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    result = best || runBfs(1);
   }
   return result;
 }

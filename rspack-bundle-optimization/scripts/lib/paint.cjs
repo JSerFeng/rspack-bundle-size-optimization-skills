@@ -35,8 +35,12 @@ function paintObserver(key) {
   })()`;
 }
 
-async function samplePaint(cdp, options, expression) {
+async function samplePaint(cdp, options, expression, tracker) {
+  tracker.reset();
+  const initialLoader = (await cdp.send('Page.getFrameTree')).frameTree.frame.loaderId;
+  tracker.start(initialLoader);
   const previousLoader = await navigate(cdp, options.url, options.cache);
+  tracker.setIgnoreLoader(previousLoader);
   const deadline = performance.now() + options.timeout;
   let measuredLoader;
   let stableSince = null;
@@ -68,7 +72,8 @@ async function samplePaint(cdp, options, expression) {
           lastLcp = sample.lcpMs;
           if (now - stableSince >= options.settleMs) {
             const { fcpMs, lcpMs, lcpElement, viewport } = sample;
-            return { fcpMs, lcpMs, lcpElement, viewport };
+            const diagnostics = tracker.snapshot();
+            return { fcpMs, lcpMs, lcpElement, viewport, diagnostics };
           }
         } else {
           stableSince = null;
@@ -85,11 +90,48 @@ async function samplePaint(cdp, options, expression) {
     ready: sample?.ready ?? false,
     fcpMs: sample?.fcpMs ?? null,
     lcpMs: sample?.lcpMs ?? null,
+    diagnostics: tracker.snapshot(),
   });
 }
 
-async function measurePaint({ endpoint, target, runs, ...options }) {
+async function measurePaint({ endpoint, target, runs, onProgress, ...options }) {
   const cdp = await CDP.connect(await targetSocket(endpoint, target));
+  const progress = typeof onProgress === 'function' ? onProgress : () => {};
+  const targetOrigin = new URL(options.url).origin;
+  const requests = new Map();
+  let active = false; let ignoreLoader = null;
+  let failedAssets = 0; let pageErrors = 0;
+  const isSameOriginAsset = row => {
+    if (!row || (row.type !== 'Script' && row.type !== 'Stylesheet')) return false;
+    try { return new URL(row.url).origin === targetOrigin; } catch { return false; }
+  };
+  cdp.on('Network.requestWillBeSent', event => {
+    if (!active || (ignoreLoader && event.loaderId === ignoreLoader)) return;
+    requests.set(event.requestId, { url: event.request.url, type: event.type, failed: false });
+  });
+  cdp.on('Network.responseReceived', event => {
+    if (!active) return;
+    const row = requests.get(event.requestId);
+    if (row && !row.failed && event.response.status >= 400 && isSameOriginAsset(row)) {
+      row.failed = true; failedAssets++;
+    }
+  });
+  cdp.on('Network.loadingFailed', event => {
+    if (!active || event.canceled) return;
+    const row = requests.get(event.requestId);
+    if (row && !row.failed && isSameOriginAsset(row)) {
+      row.failed = true; failedAssets++;
+    }
+  });
+  cdp.on('Runtime.exceptionThrown', () => {
+    if (active) pageErrors++;
+  });
+  const tracker = {
+    reset() { active = false; ignoreLoader = null; requests.clear(); failedAssets = 0; pageErrors = 0; },
+    start(prevLoader) { ignoreLoader = prevLoader; active = true; },
+    setIgnoreLoader(prevLoader) { ignoreLoader = prevLoader; },
+    snapshot() { active = false; return { failedAssets, pageErrors }; },
+  };
   const key = json(`__rspackPaint_${randomUUID()}`);
   const expression = `(() => {
     const state = globalThis[${key}];
@@ -111,6 +153,7 @@ async function measurePaint({ endpoint, target, runs, ...options }) {
   try {
     const { product, userAgent } = await cdp.send('Browser.getVersion');
     await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
     await cdp.send('Page.bringToFront');
     await cdp.send('Network.enable');
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: options.cache === 'cold' });
@@ -121,12 +164,14 @@ async function measurePaint({ endpoint, target, runs, ...options }) {
     const script = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: paintObserver(key) });
     scriptId = script.identifier;
 
-    const warmup = await samplePaint(cdp, options, expression);
+    const warmup = await samplePaint(cdp, options, expression, tracker);
+    progress(`warmup: fcp=${Math.round(warmup.fcpMs)}ms lcp=${Math.round(warmup.lcpMs)}ms${warmup.diagnostics.failedAssets || warmup.diagnostics.pageErrors ? ` (failedAssets=${warmup.diagnostics.failedAssets} pageErrors=${warmup.diagnostics.pageErrors})` : ''}`);
     const samples = [];
     for (let i = 0; i < runs; i++) {
-      const sample = await samplePaint(cdp, options, expression);
+      const sample = await samplePaint(cdp, options, expression, tracker);
       if (fingerprint(sample.viewport) !== fingerprint(warmup.viewport))
         fail('VIEWPORT_CHANGED', 'The Chrome viewport changed during the measurement.');
+      progress(`run ${i + 1}/${runs}: fcp=${Math.round(sample.fcpMs)}ms lcp=${Math.round(sample.lcpMs)}ms${sample.diagnostics.failedAssets || sample.diagnostics.pageErrors ? ` (failedAssets=${sample.diagnostics.failedAssets} pageErrors=${sample.diagnostics.pageErrors})` : ''}`);
       samples.push(sample);
     }
     const conditions = {

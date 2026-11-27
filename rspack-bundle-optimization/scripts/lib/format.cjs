@@ -147,7 +147,9 @@ function fmtGapDetail(detail) {
   if (!detail) return '-';
   if (typeof detail === 'string') return detail;
   if (detail.url && detail.reason) return `${detail.url} — ${detail.reason}`;
+  if (detail.url && detail.message) return `${detail.url} — ${detail.message}`;
   if (detail.asset && detail.message) return `${detail.asset} — ${detail.message}`;
+  if (detail.name && detail.message) return `${detail.name} — ${detail.message}`;
   if (detail.path && detail.message) return `${detail.path} — ${detail.message}`;
   if (detail.message) return detail.sourceId ? `${detail.message} (${detail.sourceId})` : detail.message;
   return JSON.stringify(detail);
@@ -661,7 +663,9 @@ function fmtRefs(data) {
 function fmtChain(data) {
   const lines = ['# Export Usage Chain'];
   lines.push(`root: ${data.root.path} (${data.root.moduleId}) :: ${fmtExport(data.root.exportPath)}`);
-  lines.push(`stats: edges=${data.edges.length}  terminals=${data.terminals.length}  cycles=${data.cycles.length}  frontier=${data.frontier.length}  truncated=${data.truncated} (maxDepth=${data.maxDepth}, maxEdges=${data.maxEdges})`);
+  const frontierCount = data.frontierTotal ?? data.frontier.length;
+  const terminalCount = data.terminalsTotal ?? data.terminals.length;
+  lines.push(`stats: edges=${data.edges.length}  terminals=${terminalCount}  cycles=${data.cycles.length}  frontier=${frontierCount}  truncated=${data.truncated} (maxDepth=${data.maxDepth}, maxEdges=${data.maxEdges})`);
 
   const cycleEdges = new Set(data.cycles.map(c => c.edgeId));
   lines.push('', '## Edges (importer -> target)');
@@ -684,7 +688,9 @@ function fmtChain(data) {
   }
 
   if (data.terminals.length) {
-    lines.push('', `## Terminals (${data.terminals.length})`);
+    const tLabel = data.terminalsTotal && data.terminalsTotal > data.terminals.length
+      ? `${data.terminals.length}/${data.terminalsTotal}` : `${data.terminals.length}`;
+    lines.push('', `## Terminals (${tLabel})`);
     for (const t of data.terminals) {
       if (t.reason === 'no-named-origin-export') {
         lines.push(`- [no-named-origin-export] ${t.path || t.moduleId} (${t.moduleId}) via ${t.edgeId} -> \`refs --edge ${t.edgeId} --context 5\``);
@@ -702,7 +708,9 @@ function fmtChain(data) {
   }
 
   if (data.frontier.length) {
-    lines.push('', `## Frontier (${data.frontier.length}, truncated)`);
+    const fLabel = data.frontierTotal && data.frontierTotal > data.frontier.length
+      ? `${data.frontier.length}/${data.frontierTotal}, truncated` : `${data.frontier.length}, truncated`;
+    lines.push('', `## Frontier (${fLabel})`);
     for (const f of data.frontier) {
       const q = f.query;
       const cur = q.cursor ? ` --cursor ${q.cursor}` : '';

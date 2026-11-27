@@ -13,21 +13,54 @@ async function record(args) {
   if (args.cache !== undefined && !['cold', 'warm'].includes(args.cache)) fail('INVALID_ARGUMENT', '--cache must be cold or warm.');
   const cache = args.cache || 'cold'; const cdp = await CDP.connect(await targetSocket(args.endpoint, args.target));
   const network = new Map(); const scripts = new Map(); const gaps = [];
+  const preNavScripts = new Set(); const preNavContexts = new Set();
   const startedAt = new Date().toISOString(); let started = false;
-  cdp.on('Network.requestWillBeSent', event => network.set(event.requestId, { requestId: event.requestId, url: event.request.url, type: event.type, start: event.timestamp }));
+  let mainFrameId = null; let previousLoader = null; let navigating = false; let frozen = false;
+  cdp.on('Network.requestWillBeSent', event => {
+    if (frozen || !navigating) return;
+    if (previousLoader && event.loaderId === previousLoader) return;
+    network.set(event.requestId, {
+      requestId: event.requestId, url: event.request.url, type: event.type, start: event.timestamp,
+      initiator: event.initiator?.type ?? null, _loaderId: event.loaderId ?? null,
+    });
+  });
   cdp.on('Network.responseReceived', event => {
+    if (frozen) return;
     const row = network.get(event.requestId); if (row) Object.assign(row, { status: event.response.status, mimeType: event.response.mimeType,
       fromDiskCache: event.response.fromDiskCache || false, fromServiceWorker: event.response.fromServiceWorker || false });
   });
-  cdp.on('Network.loadingFinished', event => { const row = network.get(event.requestId); if (row) Object.assign(row, { end: event.timestamp, encodedDataLength: event.encodedDataLength }); });
-  cdp.on('Network.loadingFailed', event => { const row = network.get(event.requestId); if (row) Object.assign(row, { error: event.errorText }); });
-  cdp.on('Debugger.scriptParsed', event => scripts.set(event.scriptId, event));
+  cdp.on('Network.loadingFinished', event => {
+    if (frozen) return;
+    const row = network.get(event.requestId); if (row) Object.assign(row, { end: event.timestamp, encodedDataLength: event.encodedDataLength });
+  });
+  cdp.on('Network.loadingFailed', event => {
+    if (frozen) return;
+    const row = network.get(event.requestId); if (row) Object.assign(row, { error: event.errorText });
+  });
+  cdp.on('Runtime.executionContextCreated', event => {
+    if (!navigating && event.context?.id !== undefined) preNavContexts.add(event.context.id);
+  });
+  cdp.on('Debugger.scriptParsed', event => {
+    scripts.set(event.scriptId, event);
+    if (!navigating) preNavScripts.add(event.scriptId);
+  });
+  cdp.on('Page.frameNavigated', event => {
+    if (frozen || !navigating) return;
+    if (mainFrameId && event.frame?.id === mainFrameId && event.frame.loaderId && event.frame.loaderId !== previousLoader) {
+      // Drop any stray requests that belonged to the previous document before navigation committed.
+      for (const [reqId, row] of network) if (row._loaderId === previousLoader) network.delete(reqId);
+    }
+  });
   try {
     const browser = await cdp.send('Browser.getVersion');
-    await cdp.send('Page.enable'); await cdp.send('Network.enable'); await cdp.send('Debugger.enable'); await cdp.send('Profiler.enable');
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await cdp.send('Network.enable'); await cdp.send('Debugger.enable'); await cdp.send('Profiler.enable');
+    const initialFrame = (await cdp.send('Page.getFrameTree')).frameTree.frame;
+    mainFrameId = initialFrame.id; previousLoader = initialFrame.loaderId;
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: cache === 'cold' });
     await cdp.send('Profiler.startPreciseCoverage', { detailed: true, callCount: true, allowTriggeredUpdates: false }); started = true;
+    navigating = true;
     const previous = await navigate(cdp, args.url, cache);
+    previousLoader = previous;
     const deadline = Date.now() + timeout;
     while (true) {
       try {
@@ -42,24 +75,35 @@ async function record(args) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     const coverage = await cdp.send('Profiler.takePreciseCoverage');
+    // Freeze the network window immediately at coverage capture time so requests fired during
+    // Debugger.getScriptSource RPCs do not create false network-without-coverage gaps.
+    frozen = true;
+    const networkSnapshot = [...network.values()]
+      .filter(row => !previousLoader || row._loaderId !== previousLoader)
+      .map(({ _loaderId, ...rest }) => rest);
     await cdp.send('Profiler.stopPreciseCoverage'); started = false;
     const captured = [];
     for (const script of coverage.result) {
+      const parsed = scripts.get(script.scriptId);
+      if (preNavScripts.has(script.scriptId) || (parsed && preNavContexts.has(parsed.executionContextId))) continue;
       try {
         const source = await cdp.send('Debugger.getScriptSource', { scriptId: script.scriptId });
-        captured.push({ ...script, url: script.url || scripts.get(script.scriptId)?.url || `debugger://script/${script.scriptId}`, text: source.scriptSource });
-      } catch (error) { gaps.push({ kind: 'script-source', url: script.url, message: error.message }); }
+        captured.push({ ...script, url: script.url || parsed?.url || `debugger://script/${script.scriptId}`, text: source.scriptSource });
+      } catch (error) {
+        if (!parsed) continue;
+        gaps.push({ kind: 'script-source', url: script.url || parsed.url || null, message: error.message });
+      }
     }
     gaps.push({ kind: 'recording-scope', message: 'Coverage is limited to the selected page isolate; workers and out-of-process frames are not included.' });
     const result = { schemaVersion: 1, kind: 'rspack-browser-recording', status: 'complete', scenario: args.scenario || 'first-screen',
       precision: 'per-block', startedAt, completedAt: new Date().toISOString(), url: args.url, browser,
       boundary: { selector: args['ready-selector'] ?? null, expression: args['ready-expression'] ?? null }, cache,
-      scripts: captured, network: [...network.values()], gaps };
+      scripts: captured, network: networkSnapshot, gaps };
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     const pending = `${destination}.${process.pid}.incomplete`;
     try { fs.writeFileSync(pending, json(result), { flag: 'wx' }); fs.linkSync(pending, destination); }
     finally { if (fs.existsSync(pending)) fs.unlinkSync(pending); }
-    return { ok: true, schemaVersion: 1, recording: destination, precision: result.precision, counts: { scripts: captured.length, requests: network.size, gaps: gaps.length } };
+    return { ok: true, schemaVersion: 1, recording: destination, precision: result.precision, counts: { scripts: captured.length, requests: networkSnapshot.length, gaps: gaps.length } };
   } finally {
     if (started) await cdp.send('Profiler.stopPreciseCoverage').catch(() => {});
     // Restore default cache behavior for the page we attached to.

@@ -66,6 +66,36 @@ test('bundled recorder captures actual Chrome block coverage before first-screen
   t.diagnostic(JSON.stringify({ directory: dir, scriptCount: data.scripts.length, generated: analysis.generated, modules: modules.page.total }));
 });
 
+test('record isolates reused Chrome tabs across different builds without leaking old scripts or requests', { skip: !chrome, timeout: 30000 }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rspack-browser-reuse-'));
+  let serveOld = true;
+  const { endpoint, url } = await openBrowser(t, dir, (request, response) => {
+    if (request.url === '/old.js') {
+      response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      response.end('globalThis.__OLD_READY__ = true; function oldOnly() { return 1; }\n');
+      return;
+    }
+    if (request.url === '/new.js') {
+      response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      response.end('globalThis.__NEW_READY__ = true; function newOnly() { return 2; }\n');
+      return;
+    }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(serveOld
+      ? '<!doctype html><script src="/old.js"></script>'
+      : '<!doctype html><script src="/new.js"></script>');
+  });
+  await record({ endpoint, url, out: path.join(dir, 'old.json'), 'ready-expression': 'globalThis.__OLD_READY__ === true', timeout: '10000' });
+  serveOld = false;
+  const newRecPath = path.join(dir, 'new.json');
+  await record({ endpoint, url, out: newRecPath, 'ready-expression': 'globalThis.__NEW_READY__ === true', timeout: '10000' });
+  const newRec = JSON.parse(fs.readFileSync(newRecPath, 'utf8'));
+  assert.ok(newRec.scripts.some(s => s.url.endsWith('/new.js')));
+  assert.equal(newRec.scripts.some(s => s.url.endsWith('/old.js')), false, 'Old document script must not leak into new recording.');
+  assert.equal(newRec.network.some(r => r.url.endsWith('/old.js')), false, 'Old document request must not leak into new recording.');
+  assert.equal(newRec.gaps.some(g => g.kind === 'script-source'), false, 'Old document scripts must not produce script-source gaps.');
+});
+
 test('paint comparison uses each median and prioritizes either regression', () => {
   const medians = summarizePaint([
     { fcpMs: 110, lcpMs: 2010 },
@@ -109,7 +139,11 @@ test('scan measures page variants and rejects a real Chrome paint regression', {
     path.join(__dirname, '../scan.cjs'), '--endpoint', endpoint, '--url', `${url}#route`,
     '--ready-selector', '#ready', '--settle-ms', '100', ...flags,
   ]);
-  const before = JSON.parse((await command('--out', baseline)).stdout);
+  const beforeRun = await command('--out', baseline);
+  const before = JSON.parse(beforeRun.stdout);
+  assert.ok(beforeRun.stderr.includes('[scan] warmup:'), 'scan.cjs should emit warmup progress to stderr.');
+  assert.ok(beforeRun.stderr.includes('[scan] run 3/3:'), 'scan.cjs should emit per-run progress to stderr.');
+  assert.deepEqual(before.diagnostics, { failedAssets: 0, pageErrors: 0 });
   const savedBefore = fs.readFileSync(baseline, 'utf8');
   assert.equal(before.comparison, null);
   assert.equal(JSON.parse(savedBefore).samples.length, 3);

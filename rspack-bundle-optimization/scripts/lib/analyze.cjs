@@ -143,7 +143,10 @@ function computeAnalysis(args, hooks = {}) {
       return result;
     };
     const fileRecords = [];
+    let processedFiles = 0;
     for (const file of files.values()) {
+      processedFiles++;
+      if (processedFiles % 5000 === 0) progress(`computing retained metrics ${processedFiles}/${files.size} sources...`);
       const moduleIds = [...file.moduleIds]; const knownHash = file.contentHash;
       const verifiedOriginal = knownHash !== null && moduleIds.some(key => modulesById.get(key)?.resource_hash === knownHash);
       const lines = [...file.lines.values()].sort((a, b) => a.lineIndex - b.lineIndex).map(line => {

@@ -185,7 +185,7 @@ function buildIndex(args) {
     }
     const edgeInsert = db.prepare('INSERT OR IGNORE INTO edges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const targetInsert = db.prepare('INSERT OR IGNORE INTO targets VALUES (?,?,?)');
-    let missingEdges = 0;
+    let missingEdges = 0; let ingestedEdges = 0;
     const ingestEdges = (adapter, edges) => {
       for (const edge of edges) {
         const origin = moduleMaps[adapter].get(edge.origin); const target = moduleMaps[adapter].get(edge.target);
@@ -199,8 +199,11 @@ function buildIndex(args) {
           if (Array.isArray(names) && names.length) for (let i = 1; i <= names.length; i++) targetInsert.run(target, json(names.slice(0, i)), key);
           else targetInsert.run(target, json(names ?? null), key);
         }
+        ingestedEdges++;
+        if (ingestedEdges % 200000 === 0) logProgress(`indexed ${ingestedEdges} graph edges...`);
       }
     };
+    logProgress(`indexing ${moduleRows.size} modules and graph edges...`);
     if (coverage) ingestEdges('coverage', coverage.edges(false));
     if (usage) { ingestEdges('usage', usage.edges()); if (!coverage) ingestEdges('usage', usage.moduleEdges()); }
     else if (coverage) ingestEdges('coverage', coverage.edges(true));

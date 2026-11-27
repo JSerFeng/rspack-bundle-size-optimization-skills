@@ -22,7 +22,7 @@ plugins: [new BundleEvidencePlugin({ directory: '/absolute/path/to/build-evidenc
 运行真实 production command。插件为每次成功构建保存独立 SQLite，并在 directory 的
 latest.json 中记录 file/buildHash；stderr 也输出完整路径。每个 compiler 用独立目录。
 失败构建不发布 complete 快照，不能沿用旧 latest 冒充新结果。
-在 EdenX / Rsbuild / Modern.js 等框架中接入时，构建日志应出现 `[BundleEvidencePlugin]` 输出且目标目录生成 `latest.json`；若框架 hook 后续重置了 `config.plugins`（导致 `appendPlugins` 失效），请直接在最终生效的 `tools.rspack` 回调里追加到 `config.plugins` 并复核产物。
+在 EdenX / Rsbuild / Modern.js 等框架中接入时，请仅在客户端 target（例如 `env === 'web'` / `target === 'web'` 或 client compiler）挂载插件，并在构建日志中确认 `[BundleEvidencePlugin]` 输出且目标目录生成 `latest.json`；若框架 hook 后续重置了 `config.plugins`（导致 `appendPlugins` 失效），请直接在最终生效的 `tools.rspack` 回调里追加到 `config.plugins` 并复核产物。
 
 快照包含产物全文与 hash、asset sourcemap、模块完整 identifier/layer、构建时源码及
 loader map、chunk 归属、chunk group/origin、module graph 和可用的原生 export usage graph。
@@ -53,8 +53,8 @@ endpoint 也可传页面 WebSocket URL（注意：仅使用 `--remote-debugging-
 --ready-expression 'globalThis.appReady === true' 可替代 selector，必须明确一种首屏完成条件。
 不要用未校验的固定等待时间代替业务就绪条件。默认超时 30 秒，--timeout 单位毫秒。
 
-脚本在新文档导航前启动 per-block coverage 和网络监听，就绪后保存实际脚本文本、原始
-V8 计数、请求清单、浏览器版本、采集边界及缺口。超时不写 complete 录制。
+脚本在导航后隔离新文档的脚本与网络窗口，并在拿到 coverage 瞬间冻结网络清单，避免复用标签页时混入旧页面脚本或取源期间晚到的异步请求。就绪后保存实际脚本文本、原始
+V8 计数、请求清单、浏览器版本、采集边界及缺口。超时不写 complete 录制。建议尽量在独立或空白标签页启动录制，避免无关页面状态干扰。
 默认 --cache cold 只禁用 HTTP cache；warm 保留 HTTP cache，不清理登录、Service Worker
 或 CacheStorage。记录实际环境，不把它自动称为全新浏览器的冷启动。
 
@@ -86,7 +86,7 @@ node <skill>/scripts/scan.cjs --endpoint http://127.0.0.1:<debug-port> \
 
 默认 `--cache cold` 禁用 HTTP cache，保留登录态和 Service Worker；需要测缓存命中时传 `--cache warm`。默认不限速，传 `--throttle mobile` 会模拟 150 ms RTT、1.6 Mbit/s 下行和 4× CPU 降速。前后两组必须在同一台机器、同一浏览器和相同的视口、限速、缓存设置下测，工具会把这些环境信息记入报告并在对比时校验。测速期间保持标签页可见，不要操作页面，也不要同时开 coverage 或其他 DevTools 录制/模拟；构建版本、登录态和后端数据的一致性仍需按实际场景确认。
 
-输出 JSON 保存每次采样和 FCP/LCP 中位数，变化阈值取 `max(30 ms, 基线中位数的 2%)`。FCP 或 LCP 任一项回退达到阈值就判为 `regressed` 并返回退出码 1（报告照常写入）；没有回退且至少一项改善判为 `improved`，其余为 `within-noise`。环境条件不一致或采样失败时直接报错，不写输出文件。这个阈值只是经验值，结果贴近边界时建议看样本分布并增加 `--runs` 重测。
+输出 JSON 保存每次采样、FCP/LCP 中位数以及同源 JS/CSS 失败与页面异常计数（`diagnostics: { failedAssets, pageErrors }`，同时往 `stderr` 输出逐次采样进度），变化阈值取 `max(30 ms, 基线中位数的 2%)`。FCP 或 LCP 任一项回退达到阈值就判为 `regressed` 并返回退出码 1（报告照常写入）；没有回退且至少一项改善判为 `improved`，其余为 `within-noise`。若 `diagnostics` 出现同源资源加载失败或页面异常，需先检查预览服务是否完整加载目标产物。环境条件不一致或采样失败时直接报错，不写输出文件。这个阈值只是经验值，结果贴近边界时建议看样本分布并增加 `--runs` 重测。
 
 ## 内置分析和查询
 

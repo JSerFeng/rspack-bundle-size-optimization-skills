@@ -124,6 +124,7 @@ test('chains retain cycles, wide-node continuations, module paths and unnamed te
   const root = f.query('modules', { search: 'src/0.js' }).items[0].moduleId;
   const result = f.query('chain', { module: root, export: 'foo', depth: 3, 'max-edges': 500 });
   assert.ok(result.truncated); assert.ok(result.frontier.length);
+  assert.ok(result.edges.length > 40, `Wide-fanout chain with frontier budgeting & binary search should pack >40 edges (got ${result.edges.length}).`);
   assert.equal(result.root.path, 'src/0.js');
   assert.ok(result.edges.every(e => e.originPath && e.targetPath));
   assert.ok(result.modules.length > 0);
@@ -478,4 +479,16 @@ test('chunks supports --multi-origin, --search, --loaded and --group --section/-
   assert.equal(page2.origins[0].request, './feature-15-' + 'x'.repeat(40));
   errorCode(() => f.query('chunks', { section: 'origins' }), 'INVALID_ARGUMENT');
   errorCode(() => f.query('chunks', { group: 'huge-shared', offset: 5 }), 'INVALID_ARGUMENT');
+
+  // fmtGapDetail renders asset-source detail.name and script-source detail.url cleanly
+  const gapText = formatText('status', {
+    mode: 'gaps',
+    page: { returned: 2, total: 2, nextCursor: null },
+    items: [
+      { gapId: 'gap_1', kind: 'asset-source', moduleId: null, modulePath: null, detail: { name: 'static/js/missing.js', message: 'Final JavaScript asset was unavailable.' } },
+      { gapId: 'gap_2', kind: 'script-source', moduleId: null, modulePath: null, detail: { url: 'http://localhost/old.js', message: 'No script for id' } },
+    ],
+  });
+  assert.ok(gapText.includes('static/js/missing.js — Final JavaScript asset was unavailable.'));
+  assert.ok(gapText.includes('http://localhost/old.js — No script for id'));
 });
