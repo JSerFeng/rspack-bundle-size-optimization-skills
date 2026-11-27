@@ -1,6 +1,6 @@
 # 数据抓取
 
-构建采集、浏览器 coverage 录制、sourcemap 分析及按需查询均由 Skill 的 scripts 提供。
+Skill 的 scripts 提供构建采集、浏览器 coverage 录制、sourcemap 分析、按需查询及首屏计时验证。
 需要 Node >=22.13；运行依赖安装在 Skill 内，被分析项目继续使用自己的 Rspack。
 
 ```sh
@@ -61,8 +61,27 @@ V8 计数、请求清单、浏览器版本、采集边界及缺口。超时不�
 录制范围是选定页面的 JS isolate，暂不包含 worker 和跨进程 iframe，录制中会记录此缺口。
 Network 中出现、但没有捕获到实际脚本文本/coverage 的资源，加载与执行归因为 unknown，
 不能因为 coverage 中缺席就判为零执行。loaded 查询范围采用可确认的脚本观察。
-precise coverage 会影响 V8 的优化执行，正常性能耗时另录一轮 trace，不混用为性能基线。
+precise coverage 会影响 V8 的优化执行，首屏计时使用独立的验证命令。
 已有 Chrome Coverage JSON（url/text/ranges）可直接复用，无需重新录制。
+
+## 首屏计时验证
+
+用同一个 Chrome 标签页和 URL 分别访问原生产构建与候选构建。先验证 URL 实际加载了对应构建。沿用上面的 endpoint、target 和就绪条件。就绪信号应能确认目标内容已渲染，例如真实列表行或页面主内容。
+
+```bash
+node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
+  --ready-selector '[data-first-screen-ready]' --out before.json
+
+# 用相同生产配置重建并在同一 URL 提供候选构建，再复测。
+node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
+  --ready-selector '[data-first-screen-ready]' --against before.json --out after.json
+```
+
+每组预热一次并测量三次，`--runs` 可增至 30。脚本在新文档中采集浏览器的 FCP/LCP。每次导航都要求页面可见、load 完成、业务就绪且两个指标可观测。LCP 在就绪后再观察 1 秒，若候选更新则重新观察。可用 `--settle-ms` 调整该窗口，`--timeout` 默认 30 秒，均以毫秒为单位。遇到晚加载内容或 LCP 元素变化时，检查报告中的 LCP 元素标签与面积，并验证页面实际显示的内容。
+
+默认禁用 HTTP cache，保留登录态及 Service Worker。用 `--cache warm` 可保留 HTTP cache。默认无额外限速，`--throttle mobile` 使用 150 ms RTT、1.6 Mbit/s 下载和 4× CPU 降速。两组使用同一台机器、浏览器、视口、限速设置和缓存策略。计时期间保持标签页可见，暂停该页的交互、coverage 和其他 DevTools 录制或模拟。报告保留这些测量设置。被比较的构建、登录会话和后端数据仍需按场景确认。
+
+JSON 文件保存每次采样和中位数。比较以 `max(30 ms, 对应基线中位数的 2%)` 为变化门槛。任一指标回退时判定为 `regressed` 并以退出码 1 结束，报告仍会写出。否则，至少一项改善记为 `improved`，其余记为 `within-noise`。设置不可比较或采样失败时返回错误且不发布测量文件。门槛是启发式，接近门槛时查看分布并复测。
 
 ## 内置分析和查询
 
