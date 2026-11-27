@@ -1,6 +1,6 @@
 # 数据抓取
 
-Skill 的 scripts 提供构建采集、浏览器 coverage 录制、sourcemap 分析、按需查询及首屏计时验证。
+构建采集、浏览器 coverage 录制、首屏耗时对比、sourcemap 分析及按需查询均由 Skill 的 scripts 提供。
 需要 Node >=22.13；运行依赖安装在 Skill 内，被分析项目继续使用自己的 Rspack。
 
 ```sh
@@ -61,27 +61,32 @@ V8 计数、请求清单、浏览器版本、采集边界及缺口。超时不�
 录制范围是选定页面的 JS isolate，暂不包含 worker 和跨进程 iframe，录制中会记录此缺口。
 Network 中出现、但没有捕获到实际脚本文本/coverage 的资源，加载与执行归因为 unknown，
 不能因为 coverage 中缺席就判为零执行。loaded 查询范围采用可确认的脚本观察。
-precise coverage 会影响 V8 的优化执行，首屏计时使用独立的验证命令。
+precise coverage 会影响 V8 的优化执行，不能拿录制 coverage 的那轮结果当性能数据；首屏 FCP/LCP 需要用下面的 `scripts/scan.cjs` 单独测。
 已有 Chrome Coverage JSON（url/text/ranges）可直接复用，无需重新录制。
 
-## 首屏计时验证
+## 首屏耗时对比
 
-用同一个 Chrome 标签页和 URL 分别访问原生产构建与候选构建。先验证 URL 实际加载了对应构建。沿用上面的 endpoint、target 和就绪条件。就绪信号应能确认目标内容已渲染，例如真实列表行或页面主内容。
+用同一个 Chrome 标签页和 URL 分别测优化前后的生产构建，开跑前先确认页面实际加载的是目标产物。`--endpoint`、`--target` 和就绪条件沿用上面 `record.cjs` 的写法；就绪条件要对应真实首屏内容（比如列表数据行或页面主体），不要只判断骨架或空容器。
 
-```bash
-node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
-  --ready-selector '[data-first-screen-ready]' --out before.json
+```sh
+node <skill>/scripts/scan.cjs --endpoint http://127.0.0.1:<debug-port> \
+  --url http://localhost:<app-port>/ \
+  --ready-selector '[data-first-screen-ready]' \
+  --out /absolute/path/to/before.json
 
-# 用相同生产配置重建并在同一 URL 提供候选构建，再复测。
-node <skill>/scripts/scan.cjs --endpoint "$chrome_endpoint" --url "$app_url" \
-  --ready-selector '[data-first-screen-ready]' --against before.json --out after.json
+# 用相同生产配置重建并部署到同一 URL 后复测
+node <skill>/scripts/scan.cjs --endpoint http://127.0.0.1:<debug-port> \
+  --url http://localhost:<app-port>/ \
+  --ready-selector '[data-first-screen-ready]' \
+  --against /absolute/path/to/before.json \
+  --out /absolute/path/to/after.json
 ```
 
-每组预热一次并测量三次，`--runs` 可增至 30。脚本在新文档中采集浏览器的 FCP/LCP。每次导航都要求页面可见、load 完成、业务就绪且两个指标可观测。LCP 在就绪后再观察 1 秒，若候选更新则重新观察。可用 `--settle-ms` 调整该窗口，`--timeout` 默认 30 秒，均以毫秒为单位。遇到晚加载内容或 LCP 元素变化时，检查报告中的 LCP 元素标签与面积，并验证页面实际显示的内容。
+每组默认先预热 1 次、正式采样 3 次，可用 `--runs` 调大到最多 30 次。每次都会重新加载文档，等标签页可见、`load` 完成、就绪条件满足且 FCP/LCP 都拿到后再继续观察 1 秒，期间如果 LCP 有更新就重新计时，直到稳定（`--settle-ms` 默认 `1000`，`--timeout` 默认 `30000`，单位都是毫秒）。遇到异步晚加载内容或前后 LCP 元素变化时，结合报告里的 `lcpElement`（标签和面积）核对页面实际渲染情况。
 
-默认禁用 HTTP cache，保留登录态及 Service Worker。用 `--cache warm` 可保留 HTTP cache。默认无额外限速，`--throttle mobile` 使用 150 ms RTT、1.6 Mbit/s 下载和 4× CPU 降速。两组使用同一台机器、浏览器、视口、限速设置和缓存策略。计时期间保持标签页可见，暂停该页的交互、coverage 和其他 DevTools 录制或模拟。报告保留这些测量设置。被比较的构建、登录会话和后端数据仍需按场景确认。
+默认 `--cache cold` 禁用 HTTP cache，保留登录态和 Service Worker；需要测缓存命中时传 `--cache warm`。默认不限速，传 `--throttle mobile` 会模拟 150 ms RTT、1.6 Mbit/s 下行和 4× CPU 降速。前后两组必须在同一台机器、同一浏览器和相同的视口、限速、缓存设置下测，工具会把这些环境信息记入报告并在对比时校验。测速期间保持标签页可见，不要操作页面，也不要同时开 coverage 或其他 DevTools 录制/模拟；构建版本、登录态和后端数据的一致性仍需按实际场景确认。
 
-JSON 文件保存每次采样和中位数。比较以 `max(30 ms, 对应基线中位数的 2%)` 为变化门槛。任一指标回退时判定为 `regressed` 并以退出码 1 结束，报告仍会写出。否则，至少一项改善记为 `improved`，其余记为 `within-noise`。设置不可比较或采样失败时返回错误且不发布测量文件。门槛是启发式，接近门槛时查看分布并复测。
+输出 JSON 保存每次采样和 FCP/LCP 中位数，变化阈值取 `max(30 ms, 基线中位数的 2%)`。FCP 或 LCP 任一项回退达到阈值就判为 `regressed` 并返回退出码 1（报告照常写入）；没有回退且至少一项改善判为 `improved`，其余为 `within-noise`。环境条件不一致或采样失败时直接报错，不写输出文件。这个阈值只是经验值，结果贴近边界时建议看样本分布并增加 `--runs` 重测。
 
 ## 内置分析和查询
 

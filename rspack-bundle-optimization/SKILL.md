@@ -1,6 +1,6 @@
 ---
 name: rspack-bundle-optimization
-description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeedy. Use for bundle-size audits, tree shaking, splitChunks, ECMAScript targets, browser loading analysis, or FCP/LCP validation of bundle changes.
+description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeedy. Use for bundle-size audits, optimization changes, tree-shaking, splitChunks, ECMAScript targets, browser loading analysis, or FCP/LCP verification.
 ---
 
 # 分析已抓取的数据
@@ -14,7 +14,7 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 
 设法访问到项目中的 Rspack 配置，让 Rspack 可以在生产环境的条件下启动起来（主要是 providedExports, usedExports, innerGraph 一定需要开启才能分析 export），但需要关闭 concatenateModules 配置，因为他会妨碍后续对 export usage 的分析，可以关闭其他对产物无关的插件来验证，然后设法启动首屏，等待首屏的稳定，确保页面加载完成。
 
-改动可能影响首屏加载时，先在原生产构建上用 `scripts/scan.cjs` 保存 FCP/LCP 基线。改动后用相同生产配置重建，在同一页面和就绪条件下用 `--against` 复测。计时与 coverage 独立进行。若页面或基线不可用，仍可报告体积与归因结果，并说明首屏计时未验证。见[首屏计时验证](references/data-capture.md#首屏计时验证)。
+如果改动会影响首屏加载，先用项目原本的生产构建跑一次 `scripts/scan.cjs` 留作 FCP/LCP 基线；优化后再用同样的生产配置重新构建，在同一页面和就绪条件下加 `--against` 复测对比（用法见 [首屏耗时对比](references/data-capture.md#首屏耗时对比)）。耗时测试和 coverage 录制要分开跑。如果环境限制拿不到页面或基线，照常输出体积和归因分析，注明首屏耗时未实测即可。
 
 ## 检查 Chunk 是否包含非必要 Module
 
@@ -96,4 +96,4 @@ description: Optimize JavaScript emitted or loaded by Rspack, Rsbuild, or Rspeed
 
 最终需要向用户交付一份完整的分析报告，包含每个模块的覆盖率、导出使用情况、分析过程、优化思路以及改动 diff。报告应清晰展示每个模块的分析结果和优化状态，确保用户能够理解每一项优化的依据和效果。
 
-首屏优化同时报告生产 JS 体积变化、FCP/LCP 基线与改动后的中位数、样本和判定。任一 paint 回退时先排查再认定收益。对改动涉及的交互运行项目测试或手动验证。
+如果做了首屏优化，报告里还要补充生产 JS 体积变化，以及 FCP/LCP 改动前后的中位数、各次采样数据和对比结论。只要 FCP 或 LCP 有回退，就需要先排查原因，不能直接算作收益；改动影响到的交互逻辑也要通过项目测试或手动验证确认正常。
